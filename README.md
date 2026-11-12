@@ -44,7 +44,7 @@ All options are in `GamepadPILOT_config.h`.
 | Controller hardware | ESP32-based OnStepX controllers only |
 | Mount types | ALTAZM, GEM, FORK (ALTALT planned) |
 | Gamepads | Anything [Bluepad32 supports](https://bluepad32.readthedocs.io/en/latest/supported_gamepads/). Button numbers may need adjusting in the config (`RAW_DEBUG_MODE` shows raw values) |
-| OnStepX | Tested on 10.28x and 10.29c |
+| OnStepX | last tested on 10.29c |
 | Board package | esp32_bluepad32 4.1.0 |
 
 **Bluetooth:** 
