@@ -1,4 +1,6 @@
-# OnStepX Gamecontroller Plugin
+# OnStepX GamepadPILOT Plugin
+
+GamepadPILOT – **P**redictive **I**nteractive **L**ive **O**rbit **T**racker.
 
 Steer your OnStepX mount with a Bluetooth gamepad, and track satellites by hand until the mount takes over.
 
@@ -10,7 +12,7 @@ Steer your OnStepX mount with a Bluetooth gamepad, and track satellites by hand 
 
 ## Features
 
-All options are in `gamecontroller_config.h`.
+All options are in `GamepadPILOT_config.h`.
 
 **Mount control**
 - Analog stick slewing with selectable speed curve (linear / square / cubic) and smooth acceleration
@@ -19,6 +21,12 @@ All options are in `gamecontroller_config.h`.
 - Toggle sidereal tracking on/off
 - Custom LX200 commands on any button or d-pad combination (e.g. park/unpark)
 
+**Safety**
+- Unlock sequence before the mount moves
+- Watchdog: mount stops if no data arrives from the controller (covers slow disconnect detection and ghosting)
+- Optional MAC whitelist, or pairing only while the mount is parked
+- Mount limits respected; short recovery window to move back inside the limits
+
 **Satellite tracking**
 - Follow the satellite with the stick, hold a button, release, and the mount continues on its own
 - Gentle stick corrections stay active the whole time
@@ -26,12 +34,6 @@ All options are in `gamecontroller_config.h`.
 - Starts by repeating your speed, then after about 13 s switches to a fitted circular orbit with closed-loop steering
 - Stops automatically at the horizon or at any mount limit
 - Optional serial stats: time to closest approach, peak elevation, orbit altitude, range, speed on the sky
-
-**Safety**
-- Unlock sequence before the mount moves
-- Watchdog: mount stops if no data arrives from the controller (covers slow disconnect detection and ghosting)
-- Optional MAC whitelist, or pairing only while the mount is parked
-- Mount limits respected; short recovery window to move back inside the limits
 
 ---
 
@@ -42,7 +44,7 @@ All options are in `gamecontroller_config.h`.
 | Controller hardware | ESP32-based OnStepX controllers only |
 | Mount types | ALTAZM, GEM, FORK (ALTALT planned) |
 | Gamepads | Anything [Bluepad32 supports](https://bluepad32.readthedocs.io/en/latest/supported_gamepads/). Button numbers may need adjusting in the config (`RAW_DEBUG_MODE` shows raw values) |
-| OnStepX | last tested on 10.29c |
+| OnStepX | Tested on 10.28x and 10.29c |
 | Board package | esp32_bluepad32 4.1.0 |
 
 **Bluetooth:** 
@@ -63,14 +65,14 @@ Works together with WiFi and the OnStepX website plugin (tested with a BLE contr
 
 ## Installation
 
-1. Copy the `gamecontroller` folder into `OnStepX/src/plugins/`.
+1. Copy the `gamepadpilot` folder into `OnStepX/src/plugins/`.
 2. In `OnStepX/src/plugins/Plugins.config.h`, use any free plugin slot, e.g.:
    ```cpp
-   #define PLUGIN3                       gamecontroller
-   #include "gamecontroller/Gamecontroller.h"
+   #define PLUGIN3                       gamepadpilot
+   #include "gamepadpilot/GamepadPILOT.h"
    #define PLUGIN3_COMMAND_PROCESSING    OFF
    ```
-3. Adjust `gamecontroller_config.h` to your liking (the defaults are a sensible start).
+3. Adjust `GamepadPILOT_config.h` to your liking (the defaults are a sensible start).
 4. Install the **esp32_bluepad32** board package in the Arduino Board Manager ([Bluepad32 Arduino setup](https://bluepad32.readthedocs.io/en/latest/plat_arduino/)).
 5. Select your board **from the esp32_bluepad32 package** (not the regular ESP32 package).
 6. Upload using **Sketch → Upload Using Programmer**.
@@ -124,7 +126,7 @@ Full details: [ORBIT_MODEL.md](ORBIT_MODEL.md)
 
 **Runtime**
 - Serial debug and stats output (`SATELLITE_STATS_PRINT`, debug options) can interfere with INDI/ASCOM on the same port. Turn them off for normal use.
-- Mount doesn't react: did you do the unlock sequence? Is the mount parked?
+- Mount doesn't react: did you do the unlock sequence (might have disconnected and reconnected silently)? Is the mount parked?
 
 Still stuck? Open an [issue](../../issues) with your board, mount type, gamepad, OnStepX and board package versions, and the serial log.
 
@@ -132,9 +134,12 @@ Still stuck? Open an [issue](../../issues) with your board, mount type, gamepad,
 
 ## Development
 
-Ideas, features and testing are my own. Most of the code text was written with the help of AI models, step by step with precise prompts. Every change was checked by me and tested on hardware. The orbit model was developed with extended help from Claude.
+Interface reference (every OnStepX call, LX200 command and where it is used):
+[INTERFACES.md](INTERFACES.md)
 
-Models used: Gemini 2.5 – 3.1 Flash, Mistral Medium 3.5, DeepSeek V4-Pro, Claude Opus 5.5.
+Ideas, features and testing are my own. Large parts of the code text were written with the help of AI models, step by step with precise prompts. Every change was checked by me and tested on hardware. The orbit model was developed with extended help from Claude.
+
+Models used: Gemini 2.5 – 3.1 Flash, Mistral Medium 3.5, DeepSeek-V4-Pro, DeepSeek-V4.1-Flash-1017 Claude Opus 5.5.
 
 ## Contributing
 
@@ -143,6 +148,9 @@ Feedback, ideas, bug reports and pull requests are welcome.
 ## License & credits
 
 GPL-3.0, like OnStepX.
+
+* Inspired by **Simon Achmüller's** work on the official OnStepX BLE Gamepad plugin.  
+Based on the original OnStep Bluetooth GamePad Controller (BGC) concept by **Howard Dutton** and **Drew**.
 
 - [OnStepX](https://github.com/hjd1964/OnStepX) by Howard Dutton
 - [Bluepad32](https://github.com/ricardoquesada/bluepad32) by Ricardo Quesada
