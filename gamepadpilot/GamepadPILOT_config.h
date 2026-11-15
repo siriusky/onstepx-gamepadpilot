@@ -48,9 +48,9 @@
 // for combined buttons add values, e.g. left trigger + X --> 68
 
 #define CYCLE_GEAR_BUTTON 32               // 32,   Cycles through speed multipliers. Controller rumbles at slowest speed.
-static const float SPEED_MULTIPLIERS[] = {0.1f, 0.3f, 1.0f};   // adjust speed multipliers here
-static const float DPAD_SPEED_MULTIPLIERS[] = {0.03f, 0.2f, 1.0f}; // adjust D-pad speed multipliers here
-#define DEFAULT_GEAR_INDEX 2               // 2,    Starts at 100% speed, values 0 ; 1 ; 2
+static const float SPEED_MULTIPLIERS[] = {0.1f, 0.3f, 1.0f};        // 0.1f, 0.3f, 1.0f, adjust speed multipliers here
+static const float DPAD_SPEED_MULTIPLIERS[] = {0.03f, 0.2f, 1.0f};  // 0.03f, 0.2f, 1.0f, adjust D-pad speed multipliers here
+#define DEFAULT_GEAR_INDEX 2               // 2,    0 = slowest gear
 
 #define SWAP_TOGGLE_BUTTON 16              // 16,   Swaps which way the stick moves the mount, for looking through the eyepiece.
 #define TOGGLE_SWAP_NS 1                   // 1,    Set to 1 to have the button toggle N/S swap
@@ -143,5 +143,18 @@ static const float DPAD_SPEED_MULTIPLIERS[] = {0.03f, 0.2f, 1.0f}; // adjust D-p
 //usb cdc on boot enable
 //use "upload using programmer"
 //use gpio pin numbering 
+
+//=============================================================================================================================
+// Compile checks, do not edit
+//=============================================================================================================================
+
+static constexpr uint8_t GEAR_COUNT = sizeof(SPEED_MULTIPLIERS) / sizeof(SPEED_MULTIPLIERS[0]);
+
+static_assert(sizeof(DPAD_SPEED_MULTIPLIERS) == sizeof(SPEED_MULTIPLIERS),
+              "DPAD_SPEED_MULTIPLIERS must have exactly as many entries as SPEED_MULTIPLIERS");
+static_assert(GEAR_COUNT >= 1,
+              "SPEED_MULTIPLIERS must contain at least one entry");
+static_assert(DEFAULT_GEAR_INDEX >= 0 && DEFAULT_GEAR_INDEX < GEAR_COUNT,
+              "DEFAULT_GEAR_INDEX must point at one of the SPEED_MULTIPLIERS entries (0 = slowest)");
 
 #endif

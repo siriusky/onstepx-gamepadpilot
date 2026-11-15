@@ -626,12 +626,7 @@ bool GamepadPILOT::handleUnlockSequence(uint8_t dpad) {
 void GamepadPILOT::handleButtonEvents(uint32_t btns, uint8_t dpad) {
     // Detect "Rising Edge" of the gear cycle button (pressed now, but wasn't before)
     if ((btns & CYCLE_GEAR_BUTTON) && !(lastBtns & CYCLE_GEAR_BUTTON)) {
-        // Calculate number of gears available
-        size_t numGears = sizeof(SPEED_MULTIPLIERS) / sizeof(SPEED_MULTIPLIERS[0]);
-        
-        // Cycle index and wrap back to 0
-        currentGearIndex = (currentGearIndex + 1) % numGears;
-        
+        currentGearIndex = (currentGearIndex + 1) % GEAR_COUNT;
         VLF(("MSG: Gear Changed! Current Multiplier: " + String(SPEED_MULTIPLIERS[currentGearIndex]) + "x").c_str());
     
         // Rumble when the slowest gear (index 0) is selected
