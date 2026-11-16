@@ -148,7 +148,7 @@ static const float DPAD_SPEED_MULTIPLIERS[] = {0.03f, 0.2f, 1.0f};  // 0.03f, 0.
 // Compile checks, do not edit
 //=============================================================================================================================
 
-static constexpr uint8_t GEAR_COUNT = sizeof(SPEED_MULTIPLIERS) / sizeof(SPEED_MULTIPLIERS[0]);
+static constexpr unsigned GEAR_COUNT = sizeof(SPEED_MULTIPLIERS) / sizeof(SPEED_MULTIPLIERS[0]);
 
 static_assert(sizeof(DPAD_SPEED_MULTIPLIERS) == sizeof(SPEED_MULTIPLIERS),
               "DPAD_SPEED_MULTIPLIERS must have exactly as many entries as SPEED_MULTIPLIERS");
