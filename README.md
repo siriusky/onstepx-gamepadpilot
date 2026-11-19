@@ -19,7 +19,7 @@ All options are in `GamepadPILOT_config.h`.
 - 3 speed gears (controller rumbles at the slowest)
 - One-button swap of N/S and E/W, for when the view through the eyepiece is mirrored
 - Toggle sidereal tracking on/off
-- Custom LX200 commands on any button or d-pad combination (e.g. park/unpark)
+- Custom LX200 commands on any button or d-pad (e.g. park/unpark)
 
 **Satellite tracking**
 - Follow the satellite with the stick, hold a button, release, and the mount continues on its own
@@ -41,15 +41,19 @@ All options are in `GamepadPILOT_config.h`.
 
 | | |
 |---|---|
-| Controller hardware | ESP32-based OnStepX controllers only |
+| Controller hardware | ESP32-based OnStepX controllers |
 | Mount types | ALTAZM, GEM, FORK (ALTALT planned) |
 | Gamepads | Anything [Bluepad32 supports](https://bluepad32.readthedocs.io/en/latest/supported_gamepads/). Button numbers may need adjusting in the config (`RAW_DEBUG_MODE` shows raw values) |
 | OnStepX | min. 10.28p, last tested on 10.29c |
-| Board package | esp32_bluepad32 4.1.0 |
 
 **Bluetooth:** 
+- Bluepad32 works with both BLE and BT Classic Gamepads
 - some ESP32 variants (e.g. ESP32-S3, ESP32-C3) only support BLE, not Bluetooth Classic. Check that your mount's ESP32 and your gamepad speak the same protocol.
 - You can not use **BluetoothSerial** with this plugin (Bluepad32 Board Manager)
+
+**WiFi and Bluetooth Classic on the original ESP32:**
+- Bluepad32's Bluetooth Classic stack and OnStepX WiFi (`SERIAL_RADIO` in `Config.h`) do not fit together in the legacy ESP32's DRAM; the build fails with a DRAM overflow.  
+Set `SERIAL_RADIO` to `OFF` and run WiFi / website plugin on a separate SWS microcontroller. This is a compile-time memory limit, not a protocol or runtime problem.
 
 **Tested on**
 
@@ -59,7 +63,7 @@ All options are in `GamepadPILOT_config.h`.
 | TerransIndustry V5 Pro kit (upgraded Meade LXD75) | GEM | ✔ on the sky |
 | Arduino Nano ESP32 bench setup (motors + Stellarium) | ALTAZM, GEM, FORK | ✔ on the bench |
 
-Works together with WiFi and the OnStepX website plugin (tested with a BLE controller). Bluetooth Classic controllers are not tested yet.
+WiFi on the same ESP32 works with BLE-only boards and a BLE gamepad.
 
 ---
 
@@ -123,10 +127,13 @@ Full details: [ORBIT_MODEL.md](ORBIT_MODEL.md)
 - Windows: move the `Arduino15` folder to a shorter path (path length limit).
 - Enable **USB CDC On Boot**.
 - Out of flash: choose the **Huge APP** partition scheme.
+- **DRAM overflow on the original ESP32:** Bluepad32's Bluetooth Classic stack plus OnStepX WiFi (`SERIAL_RADIO`) does not fit.  
+Set `SERIAL_RADIO` to `OFF` and use a separate SWS/WiFi MCU, or use a BLE-only ESP32 with a BLE gamepad.
 
 **Runtime**
 - Serial debug and stats output (`SATELLITE_STATS_PRINT`, debug options) can interfere with INDI/ASCOM on the same port. Turn them off for normal use.
 - Mount doesn't react: did you do the unlock sequence (might have disconnected and reconnected silently)? Is the mount parked?
+- Buttons don't do what you expect: If supported put your Gamepad in a different Emulation mode (switch or dinput work well)
 
 Still stuck? Open an [issue](../../issues) with your board, mount type, gamepad, OnStepX and board package versions, and the serial log.
 
