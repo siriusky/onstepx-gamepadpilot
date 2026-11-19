@@ -36,16 +36,27 @@
 
 // Button functions ---------------------------------------------------------------------------------------------------------------------
 
-//left trigger         64
-//right trigger        128
-//left bumper          16
-//right bumper         32
-//A                    1
-//B                    2
-//X                    4
-//Y                    8
-//dpad                 up:1 ; down:2 ; right:4 ; left:8
-// for combined buttons add values, e.g. left trigger + X --> 68
+// The names below are Bluepad32 positions, not necessarily the labels printed on the gamepad:
+// Some gamepads have several emulation modes. If the mapping is wrong, try another mode and
+// check the raw values with RAW_DEBUG_MODE 1.
+
+// buttons() bitmap:
+//   A / south                 1
+//   B / east                  2
+//   X / west                  4
+//   Y / north                 8
+//   left bumper  (L1)        16
+//   right bumper (R1)        32
+//   left trigger (L2)        64
+//   right trigger (R2)      128
+//   left stick click (L3)   256
+//   right stick click (R3)  512
+
+// dpad() bitmap (separate from buttons):
+//   up:1  down:2  right:4  left:8
+
+// To make a function run on either of two or more buttons, add the values of the buttons
+// Example: SWAP_TOGGLE_BUTTON 24 means you can press L1 or Y to swap directions.
 
 #define CYCLE_GEAR_BUTTON 32               // 32,   Cycles through speed multipliers. Controller rumbles at slowest speed.
 static const float SPEED_MULTIPLIERS[] = {0.1f, 0.3f, 1.0f};        // 0.1f, 0.3f, 1.0f, adjust speed multipliers here
@@ -116,7 +127,7 @@ static const float DPAD_SPEED_MULTIPLIERS[] = {0.03f, 0.2f, 1.0f};  // 0.03f, 0.
 #define SATELLITE_ORBIT_KP 1.0f                // 1.0f, 1/s: error correction rate (1.0 -> error halves in ~0.7 s)
 #define SATELLITE_ORBIT_KI 0.05f               // 0.05f,    1/s^2: removes constant offsets
 
-#define SATELLITE_ORBIT_DEBUG 0                // 1 = print orbit fit results and extrapolation error (direct Serial output, independent of OnStepX DEBUG level)
+#define SATELLITE_ORBIT_DEBUG 0                // 0,    1 = print orbit fit results and extrapolation error (direct Serial output, independent of OnStepX DEBUG level)
 
 //=============================================================================================================================
 // Performance settings
