@@ -52,8 +52,9 @@ All options are in `GamepadPILOT_config.h`.
 - You can not use **BluetoothSerial** with this plugin (Bluepad32 Board Manager)
 
 **WiFi and Bluetooth Classic on the original ESP32:**
-- Bluepad32's Bluetooth Classic stack and OnStepX WiFi (`SERIAL_RADIO` in `Config.h`) do not fit together in the legacy ESP32's DRAM; the build fails with a DRAM overflow.  
-Set `SERIAL_RADIO` to `OFF` and run WiFi / website plugin on a separate SWS microcontroller. This is a compile-time memory limit, not a protocol or runtime problem.
+- The DRAM overflow with Bluepad32 + OnStepX WiFi (`SERIAL_RADIO`) is **not a hard limit**.
+  It is under investigation, and a fix is in progress.
+- Current workaround: `SERIAL_RADIO` `OFF` and SWS on a separate MCU, or a BLE-only ESP32 (S3/C3).
 
 **Tested on**
 
@@ -127,8 +128,9 @@ Full details: [ORBIT_MODEL.md](ORBIT_MODEL.md)
 - Windows: move the `Arduino15` folder to a shorter path (path length limit).
 - Enable **USB CDC On Boot**.
 - Out of flash: choose the **Huge APP** partition scheme.
-- **DRAM overflow on the original ESP32:** Bluepad32's Bluetooth Classic stack plus OnStepX WiFi (`SERIAL_RADIO`) does not fit.  
-Set `SERIAL_RADIO` to `OFF` and use a separate SWS/WiFi MCU, or use a BLE-only ESP32 with a BLE gamepad.
+- **DRAM overflow with  WiFi on the original ESP32:** under investigation — *not* a definitive "impossible".
+  The build overflow is ~17 KB. Part of it comes from the plugin's own satellite-tracking sample
+  buffers (about 18 KB), which can be moved off fixed DRAM. Wifi stability with bt classic is being tested.
 
 **Runtime**
 - Serial debug and stats output (`SATELLITE_STATS_PRINT`, debug options) can interfere with INDI/ASCOM on the same port. Turn them off for normal use.
