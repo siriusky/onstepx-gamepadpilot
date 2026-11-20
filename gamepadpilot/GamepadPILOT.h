@@ -4,6 +4,7 @@
 // Includes
 // ============================================================================
 #include <Bluepad32.h>
+#include "../../lib/commands/CommandErrors.h"
 #include "../../libApp/commands/CommandBroker.h"
 #include "GamepadPILOT_config.h"
 
