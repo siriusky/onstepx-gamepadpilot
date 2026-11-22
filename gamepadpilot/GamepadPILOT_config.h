@@ -109,9 +109,7 @@ static const float DPAD_SPEED_MULTIPLIERS[] = {0.03f, 0.2f, 1.0f};  // 0.03f, 0.
 #define SATELLITE_TRACKING_INTEGRATION_GAIN 0.4f     //higher values give manual corrections more wheight when calculating new baseline speed
 // Advanced tracking (orbit model)
 #define SATELLITE_ORBIT_ENABLE 1               // 1,    Calculate orbit from record coordinates and fit orbit. Needed for Satellite Stats and orbit following
-#define SATELLITE_ORBIT_SAMPLE_INTERVAL_MS 500 // 500,  coordinate sample interval. Low heap (original ESP32 + WiFi): 1000 -> buffers ~2.1 KB instead of ~3 KB
-                                               //       Sample buffer size is computed from MAX_BASELINE_S + ANCHOR_A_WINDOW_S (only what a fit can use),
-                                               //       12 bytes per sample, allocated once on the heap at startup (~3 KB total with defaults)
+#define SATELLITE_ORBIT_SAMPLE_INTERVAL_MS 500 // 500,  coordinate sample interval. Low RAM (original ESP32 + WiFi): 1000 uses less memory
 #define SATELLITE_ORBIT_FIT_INTERVAL_MS 1000   // 1000, recalculate orbit every x ms
 // Two-point fit: circular orbit through anchor A (old, smoothed) and anchor B (current mount position)
 #define SATELLITE_ORBIT_DISCARD_START_S 5      // 5,    ignore the first x seconds of tracking for anchor A (least accurate)
@@ -128,12 +126,12 @@ static const float DPAD_SPEED_MULTIPLIERS[] = {0.03f, 0.2f, 1.0f};  // 0.03f, 0.
 #define SATELLITE_ORBIT_KP 1.0f                // 1.0f, 1/s: error correction rate (1.0 -> error halves in ~0.7 s)
 #define SATELLITE_ORBIT_KI 0.05f               // 0.05f,    1/s^2: removes constant offsets
 
-#define SATELLITE_ORBIT_DEBUG 0                // 0,    1 = print orbit fit results and extrapolation error (direct Serial output, independent of OnStepX DEBUG level)
+#define SATELLITE_ORBIT_DEBUG 0                // 0,    1 = print orbit fit results and extrapolation error
 
 //=============================================================================================================================
 // Performance settings
 //=============================================================================================================================
-#define POLL_INTERVAL 20                   // 20,   Logic tick rate (Bluetooth poll & main logic). 20ms (50Hz) is ideal for HID.
+#define POLL_INTERVAL 20                   // 20,   Logic tick rate (Bluetooth poll & main logic).
 #define COMMAND_INTERVAL_MULTIPLE  3       // 3,    Send slew commands every x poll ticks
 
 //=============================================================================================================================
@@ -147,14 +145,6 @@ static const float DPAD_SPEED_MULTIPLIERS[] = {0.03f, 0.2f, 1.0f};  // 0.03f, 0.
 #define VERBOSE_SYSTEM_STATS 0             // 0,    Shows system stats while running the regular tasks. 
 #define TIMING_DEBUG 0                     // 0,    Shows tick duration of the entire plugin
 #define TIMING_DEBUG_PRINT_INTERVAL 10     // 10,   if shorter than POLL_INTERVAL, sends every tick, if higher, might not catch every spike
-
-
-//in case of compiler issues, check:
-//use bluepad32 board manager for non arduino boards
-//windows: move Arduino15 folder to shorter path name
-//usb cdc on boot enable
-//use "upload using programmer"
-//use gpio pin numbering 
 
 //=============================================================================================================================
 // Compile checks, do not edit
