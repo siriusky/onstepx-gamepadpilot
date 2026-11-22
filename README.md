@@ -52,9 +52,11 @@ All options are in `GamepadPILOT_config.h`.
 - You can not use **BluetoothSerial** with this plugin (Bluepad32 Board Manager)
 
 **WiFi and Bluetooth Classic on the original ESP32:**
-- The DRAM overflow with Bluepad32 + OnStepX WiFi (`SERIAL_RADIO`) is **not a hard limit**.
-  It is under investigation, and a fix is in progress.
-- Current workaround: `SERIAL_RADIO` `OFF` and SWS on a separate MCU, or a BLE-only ESP32 (S3/C3).
+- Bluepad32 + OnStepX WiFi (`SERIAL_RADIO`) + website plugin + satellite tracking now fit into the static DRAM.
+  The satellite tracking sample buffers (~3 KB) are allocated once on the heap at startup instead of static DRAM.
+- Static DRAM margin is small (< 1 KB): other OnStepX features (more plugins, focusers, ...) may still overflow.
+- Low on heap? Set `SATELLITE_ORBIT_SAMPLE_INTERVAL_MS 1000` (buffers ~2.1 KB instead of ~3 KB).
+- WiFi stability together with BT Classic is still being tested.
 
 **Tested on**
 
@@ -128,9 +130,10 @@ Full details: [ORBIT_MODEL.md](ORBIT_MODEL.md)
 - Windows: move the `Arduino15` folder to a shorter path (path length limit).
 - Enable **USB CDC On Boot**.
 - Out of flash: choose the **Huge APP** partition scheme.
-- **DRAM overflow with  WiFi on the original ESP32:** under investigation — *not* a definitive "impossible".
-  The build overflow is ~17 KB. Part of it comes from the plugin's own satellite-tracking sample
-  buffers (about 18 KB), which can be moved off fixed DRAM. Wifi stability with bt classic is being tested.
+- **DRAM overflow (`DRAM segment data does not fit`) with WiFi on the original ESP32:** the plugin itself
+  now uses < 1 KB static DRAM; most of the DRAM is Bluepad32/btstack and WiFi. Disable other OnStepX
+  features or plugins you do not need. If startup logs `satellite tracking disabled, could not allocate`,
+  free heap was too low (try `SATELLITE_ORBIT_SAMPLE_INTERVAL_MS 1000`).
 
 **Runtime**
 - Serial debug and stats output (`SATELLITE_STATS_PRINT`, debug options) can interfere with INDI/ASCOM on the same port. Turn them off for normal use.
