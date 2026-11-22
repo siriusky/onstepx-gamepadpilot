@@ -52,11 +52,13 @@ All options are in `GamepadPILOT_config.h`.
 - You can not use **BluetoothSerial** with this plugin (Bluepad32 Board Manager)
 
 **WiFi and Bluetooth Classic on the original ESP32:**
-- Bluepad32 + OnStepX WiFi (`SERIAL_RADIO`) + website plugin + satellite tracking now fit into the static DRAM.
-  The satellite tracking sample buffers (~3 KB) are allocated once on the heap at startup instead of static DRAM.
-- Static DRAM margin is small (< 1 KB): other OnStepX features (more plugins, focusers, ...) may still overflow.
-- Low on heap? Set `SATELLITE_ORBIT_SAMPLE_INTERVAL_MS 1000` (buffers ~2.1 KB instead of ~3 KB).
-- WiFi stability together with BT Classic is still being tested.
+- OnStepX WiFi, the website plugin and GamepadPILOT (incl. satellite tracking) fit on one original ESP32 at the same time, but RAM is tight.
+- If the build fails with a DRAM overflow, or satellite tracking reports it could not allocate its buffers:
+  turn off unused features (e.g. the website plugin) or set `SATELLITE_ORBIT_SAMPLE_INTERVAL_MS 1000`.
+- WiFi and Bluetooth Classic share the same radio, which can reduce connection stability. WiFi + gamepad worked fine in testing.
+- ⚠️ **Website plugin + GamepadPILOT on the original ESP32 is highly experimental:** watchdog resets and WiFi dropouts can occur.
+  Use at your own risk. Use the website only for setup, not at the same time as other WiFi connections (OnStep App, ASCOM, INDI).
+- ESP32 variants without Bluetooth Classic (e.g. ESP32-S3) are not affected.
 
 **Tested on**
 
@@ -65,8 +67,6 @@ All options are in `GamepadPILOT_config.h`.
 | Custom Arduino Nano ESP32 alt-az mount | ALTAZM | ✔ on the sky |
 | TerransIndustry V5 Pro kit (upgraded Meade LXD75) | GEM | ✔ on the sky |
 | Arduino Nano ESP32 bench setup (motors + Stellarium) | ALTAZM, GEM, FORK | ✔ on the bench |
-
-WiFi on the same ESP32 works with BLE-only boards and a BLE gamepad.
 
 ---
 
@@ -130,10 +130,8 @@ Full details: [ORBIT_MODEL.md](ORBIT_MODEL.md)
 - Windows: move the `Arduino15` folder to a shorter path (path length limit).
 - Enable **USB CDC On Boot**.
 - Out of flash: choose the **Huge APP** partition scheme.
-- **DRAM overflow (`DRAM segment data does not fit`) with WiFi on the original ESP32:** the plugin itself
-  now uses < 1 KB static DRAM; most of the DRAM is Bluepad32/btstack and WiFi. Disable other OnStepX
-  features or plugins you do not need. If startup logs `satellite tracking disabled, could not allocate`,
-  free heap was too low (try `SATELLITE_ORBIT_SAMPLE_INTERVAL_MS 1000`).
+- **DRAM overflow (`DRAM segment data does not fit`) on the original ESP32 with WiFi:** see
+  *WiFi and Bluetooth Classic on the original ESP32* above. Turn off unused features.
 
 **Runtime**
 - Serial debug and stats output (`SATELLITE_STATS_PRINT`, debug options) can interfere with INDI/ASCOM on the same port. Turn them off for normal use.
