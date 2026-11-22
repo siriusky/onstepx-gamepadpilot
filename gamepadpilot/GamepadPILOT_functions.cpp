@@ -752,6 +752,10 @@ void GamepadPILOT::handleVerboseSystemStats() {
                       (unsigned)freeHeap, (unsigned)minFreeHeap, (unsigned)largestBlock);
         Serial.printf("MSG: Unused Plugin Stack: %u / 4096 bytes\n", (unsigned)unusedStack);
 
+        TaskHandle_t web = xTaskGetHandle("WebSvrTask");   // NULL if the website plugin is off
+        if (web) Serial.printf("MSG: Unused WebSvrTask stack: %u / 10000 bytes\n",
+                               (unsigned)uxTaskGetStackHighWaterMark(web));
+
         lastStatsTime = millis();
     }
 }
