@@ -13,6 +13,7 @@
 #include "../../libApp/commands/CommandBroker.h"
 #include "../../telescope/mount/limits/Limits.h"
 #include "../../telescope/mount/park/Park.h"
+#include <esp_heap_caps.h>   // heap_caps_get_largest_free_block() for VERBOSE_SYSTEM_STATS
 
 extern CommandBroker commandBroker;
 
@@ -726,22 +727,31 @@ void GamepadPILOT::handleButtonEvents(uint32_t btns, uint8_t dpad) {
 // Debug helpers
 // ============================================================================
 
-// Verbose system stats: print global heap and task stack high-water mark every 10s.
+// Verbose system stats: print heap diagnostics and task stack high-water mark every 3s.
+//   free heap      : total free internal heap right now
+//   min free heap  : lowest free heap since boot (the real worst case, catches short dips
+//                    between prints, e.g. WiFi/website load)
+//   largest block  : biggest single block malloc can return right now. Much smaller than
+//                    free heap = fragmented: WiFi/web allocations can fail although
+//                    "free heap" looks fine.
 void GamepadPILOT::handleVerboseSystemStats() {
     static uint32_t lastStatsTime = 0;
     if (millis() - lastStatsTime > 3000) {                       // print stats every 3 sec
-        // Check global RAM
-        uint32_t freeHeap = ESP.getFreeHeap();
-        
-        // Check specific Stack for THIS plugin task (the 8192 bytes)
-        // Returns the minimum free stack space seen since the task started (in bytes)
-        uint32_t unusedStack = uxTaskGetStackHighWaterMark(NULL); 
+        // Internal RAM heap (same pool as ESP.getFreeHeap(), excludes PSRAM;
+        // WiFi/lwIP/Bluetooth buffers must come from internal RAM)
+        uint32_t freeHeap     = ESP.getFreeHeap();
+        uint32_t minFreeHeap  = ESP.getMinFreeHeap();
+        uint32_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+        // Minimum free stack space of THIS plugin task since it started (in bytes)
+        uint32_t unusedStack = uxTaskGetStackHighWaterMark(NULL);
 
         // Direct serial output (no macro dependency)
         Serial.println("--- plugin memory stats ---");
-        Serial.printf("MSG: free global heap: %u bytes\n", freeHeap);
-        Serial.printf("MSG: Unused Plugin Stack: %u / 8192 bytes\n", unusedStack);
-        
+        Serial.printf("MSG: free heap: %u bytes | min free since boot: %u bytes | largest free block: %u bytes\n",
+                      (unsigned)freeHeap, (unsigned)minFreeHeap, (unsigned)largestBlock);
+        Serial.printf("MSG: Unused Plugin Stack: %u / 4096 bytes\n", (unsigned)unusedStack);
+
         lastStatsTime = millis();
     }
 }
@@ -849,6 +859,17 @@ void GamepadPILOT::init() {
 
 #if MAC_WHITELIST_ENABLE == 1
     VLF(("MSG: Whitelist enabled. Only allowing MAC: " + String(MAC_WHITELIST_ADDRESS)).c_str());
+#endif
+
+#if ENABLE_SAT_TRACKING_FEATURE == 1
+    // Satellite tracking sample buffers: one heap block, allocated once (not in static DRAM)
+    if (satelliteTracker.allocateBuffers()) {
+        VF("MSG: GamepadPILOT satellite tracking buffers allocated, bytes: ");
+        VL((unsigned)satelliteTracker.bufferBytes());
+    } else {
+        DF("WRN: GamepadPILOT satellite tracking disabled, could not allocate bytes: ");
+        DL((unsigned)satelliteTracker.bufferBytes());
+    }
 #endif
 
     // Create the Bluepad32 task on Core 0.

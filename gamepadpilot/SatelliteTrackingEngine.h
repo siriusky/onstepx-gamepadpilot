@@ -6,8 +6,14 @@
 #include "../../telescope/mount/site/Site.h" // for latitude
 
 
+// Start recording (button held): only every N-th tick is stored, the average over the
+// stored samples is the initial tracking speed. 40 samples * 5 ticks * 20 ms = last 4 s
+#ifndef SATELLITE_TRACKING_RECORD_EVERY_N_TICKS
+#define SATELLITE_TRACKING_RECORD_EVERY_N_TICKS 5
+#endif
+
 #ifndef SATELLITE_TRACKING_START_MAX_SAMPLES
-#define SATELLITE_TRACKING_START_MAX_SAMPLES 200 //4s at default settings 20ms tick
+#define SATELLITE_TRACKING_START_MAX_SAMPLES 40
 #endif
 
 #ifndef SATELLITE_TRACKING_MANUAL_GAIN
@@ -25,10 +31,6 @@
 
 #ifndef SATELLITE_ORBIT_SAMPLE_INTERVAL_MS
 #define SATELLITE_ORBIT_SAMPLE_INTERVAL_MS 500
-#endif
-
-#ifndef SATELLITE_ORBIT_MAX_SAMPLES
-#define SATELLITE_ORBIT_MAX_SAMPLES 600
 #endif
 
 #ifndef SATELLITE_ORBIT_FIT_INTERVAL_MS
@@ -282,6 +284,43 @@ void update(float dt, float targetXNorm, float targetYNorm,
     bool isActive() const { return active; }
     bool isRecording() const { return recording; }
 
+    // =====================================================================
+    // Buffer allocation
+    // =====================================================================
+    // The sample buffers live in ONE heap block instead of the object (.bss),
+    // because the original ESP32 runs out of static DRAM with Bluepad32 + WiFi.
+    // Call once from the plugin init(). The block is never freed (no fragmentation).
+    // Returns false if malloc failed: then enable()/startRecording() do nothing.
+    bool allocateBuffers() {
+        if (buffersReady()) return true;
+        uint8_t* p = (uint8_t*)malloc(bufferBytes());
+        if (p == nullptr) return false;
+
+        // All element types are 4-byte aligned, malloc returns >= 4-byte aligned memory
+        #if SATELLITE_ORBIT_ENABLE == 1
+        trajectorySamples = reinterpret_cast<TrajectorySample*>(p);
+        p += TRAJECTORY_MAX_SAMPLES * sizeof(TrajectorySample);
+        anchorAWindow = reinterpret_cast<OrbitSample*>(p);
+        p += ANCHOR_A_MAX_SAMPLES * sizeof(OrbitSample);
+        #endif
+        recordedX = reinterpret_cast<float*>(p);
+        p += MAX_SAMPLES * sizeof(float);
+        recordedY = reinterpret_cast<float*>(p);
+        return true;
+    }
+
+    bool buffersReady() const { return recordedX != nullptr; }
+
+    // Size of the heap block in bytes
+    size_t bufferBytes() const {
+        size_t n = 2 * MAX_SAMPLES * sizeof(float);
+        #if SATELLITE_ORBIT_ENABLE == 1
+        n += TRAJECTORY_MAX_SAMPLES * sizeof(TrajectorySample) +
+             ANCHOR_A_MAX_SAMPLES * sizeof(OrbitSample);
+        #endif
+        return n;
+    }
+
     // True once after tracking stopped because the target went below the horizon
     // (flag is cleared by this call).
     bool consumeHorizonStop() {
@@ -295,7 +334,9 @@ void update(float dt, float targetXNorm, float targetYNorm,
     // =====================================================================
 
     // mountType: OnStepX mount type (GEM, FORK, ALTAZM, ALTALT), selects the axis frame
+    // Does nothing if the buffers are missing (allocateBuffers() failed or not called).
     void enable(uint8_t mountType = ALTAZM) {
+        if (!buffersReady()) return;
         if (!active) {
             active = true;
             horizonStop = false;
@@ -349,8 +390,9 @@ void update(float dt, float targetXNorm, float targetYNorm,
     // Recording state control
     // =====================================================================
 
-    // Start coordinate recording.
+    // Start coordinate recording. Does nothing if the buffers are missing.
     void startRecording() {
+        if (!buffersReady()) return;
         recording = true;
 
         // Clear any pending tracking rate from a previous session
@@ -360,6 +402,7 @@ void update(float dt, float targetXNorm, float targetYNorm,
         // Clear previous recording data.
         recordingCount = 0;
         ringIndex = 0;
+        recordTickCounter = SATELLITE_TRACKING_RECORD_EVERY_N_TICKS - 1;  // store the first tick
     }
 
     // Stop coordinate recording.
@@ -387,21 +430,29 @@ private:
 
     // ---------------------------------------------------------------------
     // Fixed-size ring buffer: stores up to SATELLITE_TRACKING_START_MAX_SAMPLES
-    // samples. When full, the oldest sample is overwritten.
+    // samples (every SATELLITE_TRACKING_RECORD_EVERY_N_TICKS-th tick).
+    // When full, the oldest sample is overwritten. Storage: heap block (allocateBuffers()).
     // ---------------------------------------------------------------------
     static constexpr size_t MAX_SAMPLES = SATELLITE_TRACKING_START_MAX_SAMPLES;
+    static_assert(MAX_SAMPLES >= 1, "SATELLITE_TRACKING_START_MAX_SAMPLES must be at least 1");
+    static_assert(SATELLITE_TRACKING_RECORD_EVERY_N_TICKS >= 1 && SATELLITE_TRACKING_RECORD_EVERY_N_TICKS <= 255,
+                  "SATELLITE_TRACKING_RECORD_EVERY_N_TICKS must be 1..255");
 
-    float recordedX[MAX_SAMPLES];
-    float recordedY[MAX_SAMPLES];
+    float* recordedX = nullptr;          // MAX_SAMPLES entries in the heap block
+    float* recordedY = nullptr;          // MAX_SAMPLES entries in the heap block
     size_t recordingCount = 0;
     size_t ringIndex = 0;
+    uint8_t recordTickCounter = 0;       // decimation counter for recordSample()
 
     // Baseline tracking rates adjusted
     float trackingRateX = 0.0f;
     float trackingRateY = 0.0f;
 
-    // Store one target-speed sample.
+    // Store one target-speed sample (only every N-th call, the first call is always stored).
     void recordSample(float targetX, float targetY) {
+        if (++recordTickCounter < SATELLITE_TRACKING_RECORD_EVERY_N_TICKS) return;
+        recordTickCounter = 0;
+
         if (recordingCount < MAX_SAMPLES) {
             // Buffer has room.
             recordedX[recordingCount] = targetX;
@@ -537,31 +588,41 @@ private:
     // Coordinate trajectory recording (advanced tracking input)
     // Recording starts in enable(), i.e. once the simple tracker runs.
     // =====================================================================
+    // 12 bytes per sample. timeMs and limited share one 32-bit word. 
+    // The direction vector is computed when a sample is copied for a fit (copyRange/copySample).
     struct TrajectorySample {
-        uint32_t timeMs;      // ms since sessionStartMillis
-        float altitude;       // radians
-        float azimuth;        // radians
-        float dx, dy, dz;     // precomputed direction (ENU unit vector)
-        bool limited;         // recorded during a speed limit hold -> not used for fits
+        uint32_t timeMs  : 31;  // ms since sessionStartMillis (max ~24 days)
+        uint32_t limited : 1;   // recorded during a speed limit hold -> not used for fits
+        float altitude;         // radians
+        float azimuth;          // radians
     };
+    static_assert(sizeof(TrajectorySample) == 12, "TrajectorySample should be 12 bytes");
 
     static constexpr float DEG_TO_RAD_F = 0.017453292519943f;
     static constexpr float RAD_TO_DEG_F = 57.29577951308232f;
 
-    // Full pass storage (ring buffer, oldest overwritten when full)
-    static constexpr size_t TRAJECTORY_MAX_SAMPLES = SATELLITE_ORBIT_MAX_SAMPLES;
-    TrajectorySample trajectorySamples[TRAJECTORY_MAX_SAMPLES];
+    // Ring buffer, oldest overwritten when full. Sized for the oldest sample a fit can
+    // still use: anchor A window centre is at most MAX_BASELINE_S before now
+    // (window start: MAX_BASELINE_S + ANCHOR_A_WINDOW_S/2). Samples per second: the regular
+    // samples (SAMPLE_INTERVAL_MS) + one extra sample right before each fit
+    // (FIT_INTERVAL_MS). Rounded up to whole seconds + margin.
+    static constexpr size_t TRAJECTORY_SAMPLES_PER_S =
+        (1000UL + SATELLITE_ORBIT_SAMPLE_INTERVAL_MS - 1) / SATELLITE_ORBIT_SAMPLE_INTERVAL_MS +
+        (1000UL + SATELLITE_ORBIT_FIT_INTERVAL_MS - 1) / SATELLITE_ORBIT_FIT_INTERVAL_MS;
+    static constexpr size_t TRAJECTORY_MAX_SAMPLES =
+        (SATELLITE_ORBIT_MAX_BASELINE_S + SATELLITE_ORBIT_ANCHOR_A_WINDOW_S) * TRAJECTORY_SAMPLES_PER_S + 4;
+    TrajectorySample* trajectorySamples = nullptr;   // TRAJECTORY_MAX_SAMPLES entries in the heap block
     size_t trajectorySampleCount = 0;
     size_t trajectoryRingIndex = 0;      // next write position once buffer is full
     uint32_t lastTrajectorySampleTime = 0;
     uint32_t sessionStartMillis = 0;
 
-    // Anchor A window buffer (member, not on the task stack).
+    // Anchor A window buffer (heap block, not on the task stack).
     // +1 per sample taken right before a fit (max one extra per second).
     static constexpr size_t ANCHOR_A_MAX_SAMPLES =
         (SATELLITE_ORBIT_ANCHOR_A_WINDOW_S * 1000UL) / SATELLITE_ORBIT_SAMPLE_INTERVAL_MS +
         SATELLITE_ORBIT_ANCHOR_A_WINDOW_S + 2;
-    OrbitSample anchorAWindow[ANCHOR_A_MAX_SAMPLES];
+    OrbitSample* anchorAWindow = nullptr;   // ANCHOR_A_MAX_SAMPLES entries in the heap block
     OrbitSample anchorB;                 // newest raw sample ("now")
     OrbitSample midSample;               // quality check sample halfway between A and B
 
@@ -803,16 +864,21 @@ private:
             idx = trajectoryRingIndex;
             trajectoryRingIndex = (trajectoryRingIndex + 1) % TRAJECTORY_MAX_SAMPLES;
         }
-        // Precompute direction vector
-        float ca = cosf(pos.a);
-
         trajectorySamples[idx].timeMs   = now - sessionStartMillis;
         trajectorySamples[idx].altitude = pos.a;
         trajectorySamples[idx].azimuth  = pos.z;
-        trajectorySamples[idx].dx = ca * sinf(pos.z); //precompute vector
-        trajectorySamples[idx].dy = ca * cosf(pos.z);
-        trajectorySamples[idx].dz = sinf(pos.a);
-        trajectorySamples[idx].limited = speedHold;
+        trajectorySamples[idx].limited  = speedHold ? 1 : 0;
+    }
+
+    // Stored sample -> OrbitSample incl. direction vector (ENU unit vector)
+    static void toOrbitSample(const TrajectorySample& s, OrbitSample &dst) {
+        float ca = cosf(s.altitude);
+        dst.t   = s.timeMs * 0.001f;
+        dst.alt = s.altitude;
+        dst.az  = s.azimuth;
+        dst.dx  = ca * sinf(s.azimuth);
+        dst.dy  = ca * cosf(s.azimuth);
+        dst.dz  = sinf(s.altitude);
     }
 
     // i-th sample in chronological order (0 = oldest)
@@ -839,12 +905,7 @@ private:
         for (size_t i = indexAtOrAfter(tStartMs); i < trajectorySampleCount && count < maxN; i++) {
             const TrajectorySample& s = trajectoryAt(i);
             if (s.timeMs > tEndMs) break;
-            dst[count].t   = s.timeMs * 0.001f;
-            dst[count].alt = s.altitude;
-            dst[count].az  = s.azimuth;
-            dst[count].dx  = s.dx; //vectors
-            dst[count].dy  = s.dy;
-            dst[count].dz  = s.dz;
+            toOrbitSample(s, dst[count]);
             count++;
         }
         return count;
@@ -852,13 +913,7 @@ private:
 
     // Copy one stored sample (chronological index i) into an OrbitSample
     void copySample(size_t i, OrbitSample &dst) const {
-        const TrajectorySample& s = trajectoryAt(i);
-        dst.t   = s.timeMs * 0.001f;
-        dst.alt = s.altitude;
-        dst.az  = s.azimuth;
-        dst.dx  = s.dx;
-        dst.dy  = s.dy;
-        dst.dz  = s.dz;
+        toOrbitSample(trajectoryAt(i), dst);
     }
 
     // Chronological index of the last 'limited' sample with tStartMs <= t <= tEndMs,
