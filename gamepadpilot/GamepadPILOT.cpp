@@ -45,16 +45,15 @@
 //Failed to disconnect HIDS client for hids_cid=0, status=2 ?
 //single 5ms tick when starting manual movement, normal while manually moving: 80 us, probably :GX97#
 //real fix: get max speed and get acceleration public getters
-//improve slew flag cleanup
+//test axisn.autoslewstop
 //ALTALT support for those 3 people in the world who actually have an altalt mount
 //clean up RAW_DEBUG_MODE conditinal compile part?
 
 // things that could be changed in OnstepX sourcecode
 
-// make axisn.autoslew threadsafe (seems fine, but autoslew.stop is not?)
+// make axisn.autoslew threadsafe seems fine, test autoslew.stop
 // enable getacceleration, getmaxslewspeed,
 // maybe a different method of bypassing the slow acceleration- fast deceleration behaviour other than setting acceleration=10 (probably not)
-// maybe ardu nano esp32 /generic esp32 example pinmap?
 
 
 //==============================================================
@@ -132,6 +131,8 @@ bool shouldStop = connectionLost || watchdogActive;
           stickPercentY = 0;
           stickPercentrX = 0;
           stickPercentrY = 0;
+          calculateSmoothSpeeds(dt); //allow decelleration and stop to finish on quick reconnects
+          sendSlewCommands();
           #if TIMING_DEBUG == 1
             uint32_t tickEndUs = micros();
             handleTimingDebug(tickStartUs, tickEndUs);

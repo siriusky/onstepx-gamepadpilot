@@ -17,9 +17,20 @@
 // ============================================================================
 #define GP_VERSION_MAJOR           0
 #define GP_VERSION_MINOR           1
-#define GP_VERSION_PATCH           0
-#define GP_VERSION_STR             "0.1.0"
-#define GP_NAME_STR                "GamepadPILOT" // plugin name
+#define GP_VERSION_PATCH           1
+#define GP_VERSION_STR             "0.1.1"
+#define GP_NAME_STR                "GamepadPILOT"
+
+// Check OnStepX version and throw error if not supported. GamepadPILOT needs Bug fix from 10.29b, otherwise fails without error.
+#if defined(FirmwareVersionMajor) && defined(FirmwareVersionMinor) && defined(FirmwareVersionPatch)
+  constexpr bool fwAtLeast10_29b =
+      (FirmwareVersionMajor > 10) ||
+      (FirmwareVersionMajor == 10 && FirmwareVersionMinor > 29) ||
+      (FirmwareVersionMajor == 10 && FirmwareVersionMinor == 29 &&
+       FirmwareVersionPatch[0] >= 'b');
+
+  static_assert(fwAtLeast10_29b, "GamepadPILOT requires OnStepX 10.29b or newer");
+#endif
 
 // ============================================================================
 // GamepadPILOT class - Bluepad32 joystick interface for OnStepX
@@ -118,8 +129,6 @@ private:
     unsigned long limitRecoveryWindowStart = 0;
 
     // --- Cleanup and acceleration -------------------------------------------
-    uint32_t zeroInputTime = 0;       // Timestamp when movement stopped
-    bool cleanupRequired = false;     // Flag to run slew cleanup after stop
     float originalAccel = 0;          // Mount's original slew acceleration
     float activeMaxSlewSpeedRad = 0;  // Current max slew speed (rad/s)
     bool accelIsHigh = false;         // Flag for temporary high acceleration
@@ -160,8 +169,7 @@ private:
     void calculateSmoothSpeeds(float dt);                // Smooth target speeds with acceleration
     void maybeEnableHighAcceleration();                  // Temporarily raise acceleration
     void sendSlewCommands();                             // Send autoSlew commands to axes
-    void updateLastSentSpeeds();                         // Store last sent speeds, start cleanup timer
-    void checkCleanupAndPerform();                       // Perform cleanup after stopping
+    void restoreAccelerationWhenIdle();                  // Restore original acceleration when not slewing
     void handleAxisStateDebug();                         // Print axis state (debug)
     void handlePlotterDebug();                           // Print data for serial plotter
     void handleTimingDebug(uint32_t startUs, uint32_t endUs);  // Print tick duration every 500ms

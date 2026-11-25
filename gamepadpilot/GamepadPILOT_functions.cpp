@@ -404,51 +404,16 @@ void GamepadPILOT::maybeEnableHighAcceleration() {
     }
 }
 
-// Store the last sent speeds and start cleanup timer when movement stops.
-void GamepadPILOT::updateLastSentSpeeds() {
-    lastSentSpeedX = smoothTargetSpeedX;
-    lastSentSpeedY = smoothTargetSpeedY;
+// Run every poll tick. setSlewAccelerationRate() is silently ignored unless
+// autoRate == AR_NONE, so keep trying until both axes are idle.
+void GamepadPILOT::restoreAccelerationWhenIdle() {  
+    if (!accelIsHigh) return;
+    if (axis1.isSlewing() || axis2.isSlewing()) return;
 
-    // If movement has just come to a halt, start the cleanup timer
-    if (lastSentSpeedX == 0.0f && lastSentSpeedY == 0.0f) {
-        if (!cleanupRequired) {
-            zeroInputTime = millis();
-            cleanupRequired = true;
-        }
-    }
-}
-
-// Run cleanup routine 1 second after movement has fully stopped.
-void GamepadPILOT::checkCleanupAndPerform() {     //todo: make this better //todo: this does not work cleanly on some axis limits (disabled then), 
-                                                    //the real fix is better slewflag cleanup //todo: the REAL fix is making autoslew.stop threadsafe TODO
-
-        if (cleanupRequired && limits.isError()) {
-            axis1.setSlewAccelerationRate(originalAccel);
-            axis2.setSlewAccelerationRate(originalAccel);
-            accelIsHigh = false;
-            cleanupRequired = false;
-            VLF("MSG: Slew flag cleanup skipped due to limit error, acceleration restored.");
-            cleanupRequired = false;
-            return;
-        }
-
-    if (cleanupRequired && (millis() - zeroInputTime > 1000)) {
-        if (axis1.isSlewing() || axis2.isSlewing()) {
-            // Transmit LX200 commands to force state machine cleanup
-           // SERIAL_LOCAL.transmit(":RC#"); // Set rate to Center
-            SERIAL_LOCAL.transmit(":Me#"); // move east
-            SERIAL_LOCAL.transmit(":Mn#"); // move north
-            SERIAL_LOCAL.transmit(":Q#");  // Final stop (clears isSlewing flag)
-            VLF("MSG: Trying to execute Slew flag cleanup routine");
-        } else {
-            // Once isSlewing is false, restore original mount acceleration physics
-            axis1.setSlewAccelerationRate(originalAccel);
-            axis2.setSlewAccelerationRate(originalAccel);
-            accelIsHigh = false;
-            cleanupRequired = false;
-            VLF("MSG: Slew flag cleanup routine executed");
-        }
-    }
+    axis1.setSlewAccelerationRate(originalAccel);
+    axis2.setSlewAccelerationRate(originalAccel);
+    accelIsHigh = false;
+    VLF("MSG: Original acceleration restored");
 }
 
 // Send slew commands to both axes if speeds changed, respecting COMMAND_INTERVAL.
@@ -465,7 +430,6 @@ pollCounter = 0;
         if (smoothTargetSpeedX != lastSentSpeedX || smoothTargetSpeedY != lastSentSpeedY) {
             maybeEnableHighAcceleration();
 
-            // Directional Logic and OnStepX Commands
             Direction dirX, dirY;
 
             // -----------------------------------------------------------------
@@ -477,38 +441,37 @@ pollCounter = 0;
 
             // for GEM on pier side west, invert Y 
             if (mountType == GEM && mount.getPosition().pierSide == PIER_SIDE_WEST) {
-                // PIER_SIDE_WEST
                 pierSideCorrectedY = -pierSideCorrectedY;
             }
 
-            // 1. Logic for North/South (Axis 2)
-            if (pierSideCorrectedY == 0.0f) {
-                axis2.autoSlew(DIR_FORWARD, 0.0f);
-                //axis2.autoSlewStop(); //this would be ideal, but is not threadsafe
-            } else {
-                // Swap is handled in the TargetSpeed
-                dirY = (pierSideCorrectedY > 0.0f) ? DIR_REVERSE : DIR_FORWARD;
-                axis2.autoSlew(dirY, abs(pierSideCorrectedY));
-            }
-
-            // 2. Logic for East/West (Axis 1)
+            // East/West (Axis 1)
             if (smoothTargetSpeedX == 0.0f) {
-                axis1.autoSlew(DIR_FORWARD, 0.0f);
-                //axis1.autoSlewStop(); //this would be ideal, but is not threadsafe
+                if (axis1.isSlewing()) axis1.autoSlew(DIR_FORWARD, 0.0f);
             } else {
                 dirX = (smoothTargetSpeedX > 0.0f) ? DIR_FORWARD : DIR_REVERSE;
                 axis1.autoSlew(dirX, abs(smoothTargetSpeedX));
             }
             
-            updateLastSentSpeeds();
-        }
+            // North/South (Axis 2)
+            if (pierSideCorrectedY == 0.0f) {
+                if (axis2.isSlewing()) axis2.autoSlew(DIR_FORWARD, 0.0f);
+            } else {
+                dirY = (pierSideCorrectedY > 0.0f) ? DIR_REVERSE : DIR_FORWARD;
+                axis2.autoSlew(dirY, abs(pierSideCorrectedY));
+            }
 
-        // Reset cleanup trigger if movement starts again
-        if (smoothTargetSpeedX != 0.0f || smoothTargetSpeedY != 0.0f) {
-            cleanupRequired = false;
-        }
+            lastSentSpeedX = smoothTargetSpeedX;
+            lastSentSpeedY = smoothTargetSpeedY;
 
-        checkCleanupAndPerform();
+            //clear isSlewing flag, only when targetSpeed == 0 so quick direction reversal does not trigger it
+            if (lastSentSpeedX == 0.0f && lastSentSpeedY == 0.0f &&
+                targetSpeedX == 0.0f && targetSpeedY == 0.0f) {
+                SERIAL_LOCAL.transmit(":Qe#");
+                SERIAL_LOCAL.transmit(":Qn#");
+            }
+        }
+        
+        restoreAccelerationWhenIdle();
     }
 }
 
@@ -541,10 +504,6 @@ void GamepadPILOT::handleSafetyStop(bool connectionLost) {
             VLF("MSG: Watchdog Triggered (Stale Data)! Sending Safety Stop...");
         }
 
-        // Set lastSentSpeed to something non-zero to force the command timer to send the stop commands // not elegant but it works
-        lastSentSpeedX = 1.0f;  //test if this is required
-        lastSentSpeedY = 1.0f;
-        stopRetries++;
     }
 }
 
@@ -853,7 +812,7 @@ void GamepadPILOT::init() {
 
     // Create the Bluepad32 task on Core 0.
     xTaskCreatePinnedToCore(
-        bluepadTask,               // free function now file-local
+        bluepadTask,
         "GamepadPILOT",
         4096,
         this,
