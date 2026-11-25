@@ -69,7 +69,7 @@ Plugin files: `GP_functions.cpp` = `GamepadPILOT_functions.cpp`,
 | `:GX97#` | `src/telescope/mount/goto/Goto.command.cpp` | current step rate; plugin uses it as max slew speed |
 | `:SC` / `:SL` | `src/telescope/mount/site/Site.command.cpp` | `USE_DATETIME_OVERRIDE`, set date and time|
 | `:Te#` / `:Td#` | `src/telescope/mount/Mount.command.cpp` | tracking on/off |
-| `:Me#` / `:Mn#` / `:Q#` | `src/telescope/mount/guide/Guide.command.cpp` | weird slew-flag cleanup: move east, north, stop all |
+| `:Qe#` / `:Qn#` | `src/telescope/mount/guide/Guide.command.cpp` | axis stops, slew-flag cleanup after autoSlew(0) |
 | `:hP#` / `:hR#` | `src/telescope/mount/park/Park.command.cpp` | park / unpark |
 | custom | `CUSTOM_COMMANDS` in `GamepadPILOT_config.h`, handleButtonEvents | sent via `SERIAL_LOCAL` |
 
@@ -86,12 +86,9 @@ Plugin files: `GP_functions.cpp` = `GamepadPILOT_functions.cpp`,
 - Acceleration handling: Plugin sets acceleration to 10.0 rad/s^2 in
   `maybeEnableHighAcceleration()` to calculate its own acceleration  
   (otherwise Onstepx does not apply acceleration when slowing down)
-  the restore path is skipped while `limits.isError()` and runs only once both axes report not slewing.
-- Stopping an Autoslew axisn.autoSlew(): `autoSlewStop()` and `autoSlewAbort()` crash OnstepX from inside a plugin. (Thread safety?)  
-  But why does autoSlew() work??? Idk, but good thing it does.
-- TODO `:Me#`/`:Mn#`/`:Q#` slew flag cleanup is a workaround: the axis
-  state machine stays in a slew after `autoSlew(dir, 0.0f)`. The real fix
-  is a thread-safe `autoSlewStop()`.
+- TODO `:Qe#`/`:Qn#` slew flag cleanup is a workaround: the axis
+  state machine stays in a slew after `autoSlew(dir, 0.0f)`.  
+  Need to test why autoSlewStop() does not run from inside plugin.
 - TODO ALTALT mount support (might still partially work rn)
 
 
