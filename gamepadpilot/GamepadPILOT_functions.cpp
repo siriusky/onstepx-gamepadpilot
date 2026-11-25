@@ -496,14 +496,14 @@ void GamepadPILOT::handleSafetyStop(bool connectionLost) {
         #endif
     }
 
-    // Only run the notification and immediate-stop logic for a few cycles to avoid flooding
-    if (stopRetries < 3) {
-        if (connectionLost) {
+    // Notify once per contiguous safety-stop event.
+    if (!safetyStopNoticeSent) {
+       if (connectionLost) {
             VLF("MSG: Connection Lost! Sending Safety Stop...");
         } else {
             VLF("MSG: Watchdog Triggered (Stale Data)! Sending Safety Stop...");
         }
-
+        safetyStopNoticeSent = true;
     }
 }
 

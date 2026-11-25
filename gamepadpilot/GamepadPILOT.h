@@ -64,9 +64,7 @@ private:
     // --- Mount type --------------------------------------------------------
     uint8_t mountType = 0;            // OnStepX mount type (1..4) (GEM; FORK; ALTAZM; ALTALT)
 
-
     // --- Raw input state ----------------------------------------------------
-    int32_t stopRetries = 3;          // Safety stop attempt counter (prevents immediate stop)
     uint32_t lastDataMillis = 0;      // Timestamp of last fresh data for watchdog
     uint8_t pollCounter = 0;          // Send tick counter (sendSlewCommands, satellite control step)
     //int32_t lastxVal = 0;             // Previous left stick X raw value
@@ -141,6 +139,7 @@ private:
     UnlockStep currentUnlockStep = STEP_LOCKED;  // Current step of unlock sequence
     uint32_t holdStartTime = 0;       // Timestamp when D-pad hold started
     uint32_t waitForUpStartTime = 0;  // DOWN-release timestamp for the UP window
+    bool safetyStopNoticeSent = false;// Verbose message in handleSafetyStop()
 
     #if PARK_PAIRING_ONLY == 1
     String sessionWhitelistedMac = "";              // MAC saved after first accepted park pairing (uppercase)

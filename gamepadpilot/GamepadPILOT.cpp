@@ -111,7 +111,7 @@ bool shouldStop = connectionLost || watchdogActive;
 
 // Main loop running the slewing =========================================================
   if (!shouldStop) {
-    stopRetries = 0;
+    safetyStopNoticeSent = false;
 
     // --- debug: raw controller output -------------------------------------
     #if RAW_DEBUG_MODE != 0
