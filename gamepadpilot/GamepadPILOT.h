@@ -17,8 +17,8 @@
 // ============================================================================
 #define GP_VERSION_MAJOR           0
 #define GP_VERSION_MINOR           1
-#define GP_VERSION_PATCH           1
-#define GP_VERSION_STR             "0.1.1"
+#define GP_VERSION_PATCH           2
+#define GP_VERSION_STR             "0.1.2"
 #define GP_NAME_STR                "GamepadPILOT"
 
 // Check OnStepX version and throw error if not supported. GamepadPILOT needs Bug fix from 10.29b, otherwise fails without error.
