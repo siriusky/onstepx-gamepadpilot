@@ -109,14 +109,13 @@ static const float DPAD_SPEED_MULTIPLIERS[] = {0.03f, 0.2f, 1.0f};  // 0.03f, 0.
 #define SATELLITE_TRACKING_INTEGRATION_GAIN 0.4f     //higher values give manual corrections more wheight when calculating new baseline speed
 // Advanced tracking (orbit model)
 #define SATELLITE_ORBIT_ENABLE 1               // 1,    Calculate orbit from record coordinates and fit orbit. Needed for Satellite Stats and orbit following
-#define SATELLITE_ORBIT_SAMPLE_INTERVAL_MS 500 // 500,  coordinate sample interval
-#define SATELLITE_ORBIT_MAX_SAMPLES 600        // 600, stored samples for the whole pass (600 * 500ms = 5 min, 12 bytes each)
+#define SATELLITE_ORBIT_SAMPLE_INTERVAL_MS 500 // 500,  coordinate sample interval. Low RAM (original ESP32 + WiFi): 1000 uses less memory
 #define SATELLITE_ORBIT_FIT_INTERVAL_MS 1000   // 1000, recalculate orbit every x ms
 // Two-point fit: circular orbit through anchor A (old, smoothed) and anchor B (current mount position)
 #define SATELLITE_ORBIT_DISCARD_START_S 5      // 5,    ignore the first x seconds of tracking for anchor A (least accurate)
 #define SATELLITE_ORBIT_MIN_ANCHOR_ALT_DEG 15  // 15,   anchors only above this elevation; below it the last orbit is kept
 #define SATELLITE_ORBIT_MIN_BASELINE_S 6       // 6,    min. seconds between anchor A centre and now; first orbit ~ DISCARD + A_WINDOW/2 + this
-#define SATELLITE_ORBIT_MAX_BASELINE_S 60      // 60,   max. seconds between anchors; anchor A moves forward on long passes
+#define SATELLITE_ORBIT_MAX_BASELINE_S 60      // 60,   max. seconds between anchors; anchor A moves forward on long passes. Longer baseline increases memory usage.
 #define SATELLITE_ORBIT_ANCHOR_A_WINDOW_S 4    // 4,    anchor A: quadratic smoothing over x seconds (centred)
 #define SATELLITE_ORBIT_MAX_DEV_DEG 0.25f      // 0.25f,    orbit misses the sample halfway between the anchors by more than x deg -> back to simple tracking, new orbit with shorter baseline
 // Speed limit hold: no orbit updates while an axis is (or the orbit would need to be) at max slew speed
@@ -127,12 +126,12 @@ static const float DPAD_SPEED_MULTIPLIERS[] = {0.03f, 0.2f, 1.0f};  // 0.03f, 0.
 #define SATELLITE_ORBIT_KP 1.0f                // 1.0f, 1/s: error correction rate (1.0 -> error halves in ~0.7 s)
 #define SATELLITE_ORBIT_KI 0.05f               // 0.05f,    1/s^2: removes constant offsets
 
-#define SATELLITE_ORBIT_DEBUG 0                // 0,    1 = print orbit fit results and extrapolation error (direct Serial output, independent of OnStepX DEBUG level)
+#define SATELLITE_ORBIT_DEBUG 0                // 0,    1 = print orbit fit results and extrapolation error
 
 //=============================================================================================================================
 // Performance settings
 //=============================================================================================================================
-#define POLL_INTERVAL 20                   // 20,   Logic tick rate (Bluetooth poll & main logic). 20ms (50Hz) is ideal for HID.
+#define POLL_INTERVAL 20                   // 20,   Logic tick rate (Bluetooth poll & main logic).
 #define COMMAND_INTERVAL_MULTIPLE  3       // 3,    Send slew commands every x poll ticks
 
 //=============================================================================================================================
@@ -146,14 +145,6 @@ static const float DPAD_SPEED_MULTIPLIERS[] = {0.03f, 0.2f, 1.0f};  // 0.03f, 0.
 #define VERBOSE_SYSTEM_STATS 0             // 0,    Shows system stats while running the regular tasks. 
 #define TIMING_DEBUG 0                     // 0,    Shows tick duration of the entire plugin
 #define TIMING_DEBUG_PRINT_INTERVAL 10     // 10,   if shorter than POLL_INTERVAL, sends every tick, if higher, might not catch every spike
-
-
-//in case of compiler issues, check:
-//use bluepad32 board manager for non arduino boards
-//windows: move Arduino15 folder to shorter path name
-//usb cdc on boot enable
-//use "upload using programmer"
-//use gpio pin numbering 
 
 //=============================================================================================================================
 // Compile checks, do not edit
