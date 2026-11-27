@@ -142,16 +142,13 @@ handleVerboseSystemStats();
         // --- normalize sticks to -1..1 -------------------------------------
         processStickNormalization();
 
-        bool userSlewInputActive = !mainStickCentered();
-#if USE_DPAD_SLEWING == 1
-        userSlewInputActive = userSlewInputActive || (dpad != 0);
-#endif
+        bool inputActive = slewInputActive();
       
-        // request max slew speed only on rising edge of stick activity
-        if (userSlewInputActive && !wasUserSlewInputActive) {
+        // request max slew speed only on rising edge of stick/D-pad activity
+        if (inputActive && !wasUserSlewInputActive) {
             requestMaxSlewSpeed();
         }
-        wasUserSlewInputActive = userSlewInputActive;
+        wasUserSlewInputActive = inputActive;
 
         // check async max slew speed response
         if (brokerHandle != 0) {

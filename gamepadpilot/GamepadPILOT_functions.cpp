@@ -336,7 +336,7 @@ void GamepadPILOT::updateTargetSpeeds(float deltaTime) {
 }
 
 // Check for limit error. When error occurs only allow movement for a short amount of time, 
-// then sticks need to be centered again.
+// then stick and D-pad input must be released again.
 void GamepadPILOT::applyLimits(float &speedX, float &speedY) {
     // If tracking is active and outside limits, stop tracking immediately
 #if ENABLE_SAT_TRACKING_FEATURE == 1
@@ -359,17 +359,17 @@ void GamepadPILOT::applyLimits(float &speedX, float &speedY) {
         if (ctl && ctl->isConnected()) ctl->playDualRumble(0, 100, 0x80, 0x40);
     }
 
-    if (recoveryState == RecoveryState::WAITING_FOR_CENTER && mainStickCentered()) {
+    if (recoveryState == RecoveryState::WAITING_FOR_CENTER && !slewInputActive()) {
         recoveryState = RecoveryState::ARMED;
     }
 
-    if (recoveryState == RecoveryState::ARMED && !mainStickCentered()) {
+    if (recoveryState == RecoveryState::ARMED && slewInputActive()) {
         recoveryState = RecoveryState::MOVING;
         limitRecoveryWindowStart = millis();
     }
 
-    // re-arm when sticks are centered while in MOVING state
-    if (recoveryState == RecoveryState::MOVING && mainStickCentered()) {
+    // re-arm when all slew input is released while in MOVING state
+    if (recoveryState == RecoveryState::MOVING && !slewInputActive()) {
         recoveryState = RecoveryState::ARMED;
     }
 
@@ -379,9 +379,9 @@ void GamepadPILOT::applyLimits(float &speedX, float &speedY) {
 
     // ENFORCE SAFETY RULES:
     // Force a full stop if:
-    // 1. The sticks are dead-centered (blocks other background processes from moving it)
+    // 1. No slew input is active (blocks other background processes from moving it)
     // 2. OR not armed yet, and the moving window has already expired.
-    if (mainStickCentered() || (recoveryState != RecoveryState::ARMED && !windowOpen)) {
+    if (!slewInputActive() || (recoveryState != RecoveryState::ARMED && !windowOpen)) {
         speedX = 0.0f;
         speedY = 0.0f;
     }

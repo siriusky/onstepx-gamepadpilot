@@ -22,7 +22,7 @@
                                            //       so park the mount (app/handbox) before switching on the controller.
                                            //       After pairing, unpark (e.g. :hR# custom command) to move the mount.
 
-#define LIMIT_RECOVERY_WINDOW_MS 500       // 500,  When mount runs outside limit, it can be unlocked this long to move back inside limts. To unlock center all sticks.
+#define LIMIT_RECOVERY_WINDOW_MS 500       // 500,  When mount runs outside limit, it can be unlocked this long to move back inside limits. To unlock, release stick and D-pad.
 
 //=============================================================================================================================
 // Mount control and movement

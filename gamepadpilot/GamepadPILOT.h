@@ -89,6 +89,15 @@ private:
     float mainStickY() const { return USE_RIGHT_STICK_SELECTED ? stickPercentrY : stickPercentY; }
     bool  mainStickCentered() const { return mainStickX() == 0.0f && mainStickY() == 0.0f; }
 
+    // True while trying to slew (main stick deflected, or D-pad pressed if enabled)
+    bool slewInputActive() const {
+        return !mainStickCentered()
+#if USE_DPAD_SLEWING == 1
+            || dpad != 0
+#endif
+        ;
+    }
+
     // --- Normalized stick values (-1.0 to 1.0) ------------------------------
     float stickPercentX = 0;          // Left stick X normalized
     float stickPercentY = 0;          // Left stick Y normalized
@@ -108,8 +117,8 @@ private:
     // --- Mount limits -------------------------------------------------------
     enum class RecoveryState : uint8_t {
         IDLE,               // Normal operation (inside safe boundaries)
-        WAITING_FOR_CENTER, // Breached a limit; waiting for user to let go of sticks
-        ARMED,              // Sticks were centered; ready for the next movement nudge
+        WAITING_FOR_CENTER, // Breached a limit; waiting for user to release stick and D-pad
+        ARMED,              // All slew input released; ready for the next movement nudge
         MOVING              // actively backing away; countdown timer is running
     };
 
