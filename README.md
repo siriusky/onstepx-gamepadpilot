@@ -100,7 +100,7 @@ All options are in `GamepadPILOT_config.h`.
 | B | Unpark |
 | Left trigger | Satellite tracking: hold to start, press to stop |
 
-If the mount ended up outside a limit, center all sticks to get a short window to move it back.
+If the mount ended up outside a limit, release the sticks and D-pad to get a short window to move it back.
 
 ### Satellite tracking
 
