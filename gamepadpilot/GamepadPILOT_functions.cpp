@@ -49,14 +49,15 @@ static inline bool risingEdge(uint32_t current, uint32_t previous, uint32_t bits
 // Convert raw Bluepad32 stick values (-512..511) to normalized range -1.0..1.0.
 // Applies deadzone and manual clamping.
 static inline float normalizeStick(int val, int deadzone, float reciprocal) {
-    if (abs(val) <= deadzone) return 0.0f;
-
-    int sign = (val > 0) ? 1 : -1;
-    float result = static_cast<float>(abs(val) - deadzone) * reciprocal * sign;
-
-    if (result > 1.0f) return 1.0f;
-    if (result < -1.0f) return -1.0f;
-    return result;
+    if (val > deadzone) {
+        float res = static_cast<float>(val - deadzone) * reciprocal;
+        return (res > 1.0f) ? 1.0f : res;
+    }
+    if (val < -deadzone) {
+        float res = static_cast<float>(val + deadzone) * reciprocal;
+        return (res < -1.0f) ? -1.0f : res;
+    }
+    return 0.0f;
 }
 
 // ============================================================================
