@@ -21,15 +21,23 @@ extern CommandBroker commandBroker;
 // File-local compile-time constants and math helpers
 // ============================================================================
 namespace {
-// used in normalizestick()
-    constexpr float RANGE_RECIPROCAL = 1.0f / (float)(STICK_MAX - DEADZONE);
+// used in normalizeStick()
+constexpr float RANGE_RECIPROCAL = 1.0f / static_cast<float>(STICK_MAX - DEADZONE);
+constexpr float DEG_TO_RAD_F = 0.017453292519943f;
+
+// Temporary acceleration used while slewing and upper bound for the
+// acceleration derived from the mount configuration (rad/s^2).
+constexpr float HIGH_SLEW_ACCEL_RAD_S2 = 10.0f;
+
+// Conservative acceleration used when the derived value is above the bound.
+constexpr float SAFE_SLEW_ACCEL_RAD_S2 = 0.1f;
 }
 
 // Smoothly approach target speed using a fixed rate over delta time.
 // Snaps to target when close enough to avoid micro-oscillation.
 static inline float applyAcceleration(float target, float current, float rate, float dt) {
     float step = rate * dt;
-    if (abs(current - target) < step) return target;
+    if (fabsf(current - target) < step) return target;
     return (current < target) ? (current + step) : (current - step);
 }
 
@@ -43,9 +51,8 @@ static inline bool risingEdge(uint32_t current, uint32_t previous, uint32_t bits
 static inline float normalizeStick(int val, int deadzone, float reciprocal) {
     if (abs(val) <= deadzone) return 0.0f;
 
-    //this can be micro optimized to use esp32 internal fpu, maybe later
     int sign = (val > 0) ? 1 : -1;
-    float result = (float)(abs(val) - deadzone) * reciprocal * sign;
+    float result = static_cast<float>(abs(val) - deadzone) * reciprocal * sign;
 
     if (result > 1.0f) return 1.0f;
     if (result < -1.0f) return -1.0f;
@@ -56,10 +63,10 @@ static inline float normalizeStick(int val, int deadzone, float reciprocal) {
 // FreeRTOS task function (file-local)
 // ============================================================================
 
-// This is the main task that runs on Core 0.
+// Main task that runs on Core 0.
 // It casts the void pointer back to GamepadPILOT and repeatedly calls run().
 static void bluepadTask(void* pvParameters) {
-    GamepadPILOT* myPlugin = (GamepadPILOT*)pvParameters;
+    GamepadPILOT* myPlugin = static_cast<GamepadPILOT*>(pvParameters);
 
     // Initial pause to avoid competing for resources during OnStepX startup.
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -78,11 +85,7 @@ static void bluepadTask(void* pvParameters) {
 // Bluepad32 connection callbacks and state reset
 // ============================================================================
 
-void GamepadPILOT::resetControllerState() {
-  //  lastxVal = 0;
-  //  lastyVal = 0;
-  //  lastrxVal = 0;
-  //  lastryVal = 0;
+void GamepadPILOT::resetButtonEdges() {
     lastBtns = 0;
     lastDpad = 0;
 }
@@ -105,10 +108,10 @@ static String macToString(ControllerPtr ctl) {
 // look connected while being ignored.
 void GamepadPILOT::onConnected(ControllerPtr ctl) {
     String macStr = macToString(ctl);
-    String modelName = ctl->getModelName().c_str();
+    String modelName = ctl->getModelName();
 
     // Limit log spam from a rejected controller that keeps retrying:
-    // the same MAC is logged at most every 5 s.
+    // the same MAC is logged at most every 2 s.
     static String lastLoggedMac = "";
     static uint32_t lastLoggedMs = 0;
     bool logAttempt = (macStr != lastLoggedMac) || (millis() - lastLoggedMs > 2000);
@@ -117,12 +120,12 @@ void GamepadPILOT::onConnected(ControllerPtr ctl) {
         lastLoggedMs = millis();
     }
 
-    #if MAC_WHITELIST_ENABLE == 1 || PARK_PAIRING_ONLY == 1
+#if MAC_WHITELIST_ENABLE == 1 || PARK_PAIRING_ONLY == 1
         // Show every controller that tries to connect, to find out its MAC.
         if (logAttempt) {
             VLF(("MSG: Controller connecting: " + modelName + ", MAC " + macStr).c_str());
         }
-    #endif
+#endif
 
     const char* rejectReason = nullptr;
 
@@ -131,16 +134,16 @@ void GamepadPILOT::onConnected(ControllerPtr ctl) {
         rejectReason = "another controller is already connected";
     }
 
-    #if MAC_WHITELIST_ENABLE == 1
+#if MAC_WHITELIST_ENABLE == 1
         // Static whitelist check
         if (rejectReason == nullptr) {
             String whitelistStr = MAC_WHITELIST_ADDRESS;
             whitelistStr.toUpperCase();
             if (macStr != whitelistStr) rejectReason = "MAC not whitelisted";
         }
-    #endif
+#endif
 
-    #if PARK_PAIRING_ONLY == 1
+#if PARK_PAIRING_ONLY == 1
         // Park-pairing-only: the first controller must connect while the mount is parked,
         // afterwards only that MAC may (re)connect for the rest of the session.
         bool newSessionPairing = false;
@@ -154,13 +157,14 @@ void GamepadPILOT::onConnected(ControllerPtr ctl) {
                 newSessionPairing = true;
             }
         }
-    #endif
+#endif
 
     if (rejectReason != nullptr) {
         if (logAttempt) {
             VLF(("MSG: Controller rejected (" + String(rejectReason) + "), disconnecting MAC " + macStr).c_str());
         }
-        // todo: test ctl->disconnect()  for error "Failed to disconnect HIDS client", works fine with Bluepad32 4.1.0 and Xbox One
+        // todo: test ctl->disconnect()  for error "Failed to disconnect HIDS client", 
+        // works fine with Bluepad32 4.1.0 and Xbox One
         ctl->disconnect();
         return;
     }
@@ -168,9 +172,9 @@ void GamepadPILOT::onConnected(ControllerPtr ctl) {
     // Accept: store the controller in slot 0.
     gamepadpilot.myControllers[0] = ctl;
     gamepadpilot.lastDataMillis = millis();  // initialise watchdog timer
-    gamepadpilot.resetControllerState();
+    gamepadpilot.resetButtonEdges();
 
-    #if PARK_PAIRING_ONLY == 1
+#if PARK_PAIRING_ONLY == 1
         if (newSessionPairing) {
             // Remember the MAC only once the slot is actually assigned.
             gamepadpilot.sessionWhitelistedMac = macStr;
@@ -178,7 +182,7 @@ void GamepadPILOT::onConnected(ControllerPtr ctl) {
         } else {
             VLF("MSG: Session-paired controller reconnected.");
         }
-    #endif
+#endif
 
     VLF(("MSG: Connected to: " + modelName + ", MAC " + macStr).c_str());
     VLF("MSG: Gamepad connected");
@@ -190,7 +194,7 @@ void GamepadPILOT::onDisconnected(ControllerPtr ctl) {
     // Clear slot 0 if the disconnected controller matches the stored one.
     if (gamepadpilot.myControllers[0] == ctl) {
         gamepadpilot.myControllers[0] = nullptr;
-        gamepadpilot.resetControllerState();
+        gamepadpilot.resetButtonEdges();
         VLF("MSG: Gamepad disconnected");
     }
 }
@@ -200,7 +204,7 @@ void GamepadPILOT::onDisconnected(ControllerPtr ctl) {
 // ============================================================================
 
 // Request the current max slew speed from the mount asynchronously.
-// The broker handle is stored and later processed in checkBrokerResult().
+// The broker handle is stored and later processed in updateMaxSlewSpeedFromBroker().
 void GamepadPILOT::requestMaxSlewSpeed() {
     if (brokerHandle == 0) {
         brokerHandle = commandBroker.request(":GX97#", 200);
@@ -209,27 +213,36 @@ void GamepadPILOT::requestMaxSlewSpeed() {
 
 // Check and process the asynchronous :GX97# request, updating max slew and acceleration.
 void GamepadPILOT::updateMaxSlewSpeedFromBroker() {
-       char reply[20];
-       // result() returns CB_DONE when the core has answered the :GX97# command
-       CommandBrokerStatus status = commandBroker.result(brokerHandle, reply, sizeof(reply));
-       if (status == CB_DONE) {
-           float maxSpeedDeg = atof(reply); // reply format is "n.n#"
-           if (maxSpeedDeg > 0.1f && maxSpeedDeg < 360.0f) {   // sanity bounds
-               activeMaxSlewSpeedRad = maxSpeedDeg * 0.01745329f; // Degrees/s to Radians/s
-               
-               // Recalculate original acceleration to maintain consistency with the new max speed
-               float d_rad = (float)SLEW_ACCELERATION_DIST * 0.01745329f;
-               originalAccel = (d_rad > 0) ? (activeMaxSlewSpeedRad * activeMaxSlewSpeedRad) / (2.0f * d_rad) : 10.0f;
-               if (originalAccel > 10.0f) {
-                   originalAccel = 0.1f;
-                   VLF("MSG: Safety feature: Set acceleration to safe 0.1f rad/s^2 value as calculated originalaccel was higher than 10.0f");
-                }   
-               VLF(("MSG: GamepadPILOT updated MaxSlew from :GX97#: " + String(maxSpeedDeg) + " deg/s (Accel: " + String(originalAccel) + ")").c_str());
-           }
-           brokerHandle = 0; // Reset handle after success to allow the next stick movement to trigger a fresh poll
-       } else if (status == CB_TIMEOUT || status == CB_FREE) {
+    char reply[20];
+    // result() returns CB_DONE when the core has answered the :GX97# command
+    CommandBrokerStatus status = commandBroker.result(brokerHandle, reply, sizeof(reply));
+    if (status == CB_DONE) {
+        if (strchr(reply, '#')) {            // replies without # rejected
+            float maxSpeedDeg = atof(reply); // reply format is "n.n#"
+            if (maxSpeedDeg > 0.1f && maxSpeedDeg < 360.0f) {   // sanity bounds
+                activeMaxSlewSpeedRad = maxSpeedDeg * DEG_TO_RAD_F; // Degrees/s to Radians/s
+
+                // Recalculate original acceleration to maintain consistency with the new max speed
+                originalAccel = accelerationFromMaxSpeed(activeMaxSlewSpeedRad);
+
+                VLF(("MSG: GamepadPILOT updated MaxSlew from :GX97#: " + String(maxSpeedDeg) + " deg/s (Accel: " + String(originalAccel) + ")").c_str());
+            }
+            brokerHandle = 0; // Reset handle after success to allow the next stick movement to trigger a fresh poll
+        }
+    } else if (status == CB_TIMEOUT || status == CB_FREE) {
         brokerHandle = 0; // Reset handle on failure so can try again on next movement
     }
+}
+
+// Derive the mount's original slew acceleration from a maximum slew speed.
+// a = v^2 / (2 * d), with a conservative fallback and safety cap.
+float GamepadPILOT::accelerationFromMaxSpeed(float maxSlewRad) const {
+    const float dRad = static_cast<float>(SLEW_ACCELERATION_DIST) * DEG_TO_RAD_F;
+    if (dRad <= 0.0f) return SAFE_SLEW_ACCEL_RAD_S2;
+
+    const float accel = (maxSlewRad * maxSlewRad) / (2.0f * dRad);
+    if (accel > HIGH_SLEW_ACCEL_RAD_S2) return SAFE_SLEW_ACCEL_RAD_S2;
+    return accel;
 }
 
 // ============================================================================
@@ -260,23 +273,23 @@ void GamepadPILOT::processStickNormalization() {
 
 // Apply the configured stick response curve to a single axis value.
 float GamepadPILOT::applyStickCurve(float value) {
-    #if STICK_CURVE_EXPONENT == 2
-        return value * abs(value);
-    #elif STICK_CURVE_EXPONENT == 3
+#if STICK_CURVE_EXPONENT == 2
+        return value * fabsf(value);
+#elif STICK_CURVE_EXPONENT == 3
         return value * value * value;
-    #else
+#else
         return value;
-    #endif
+#endif
 }
 
 // Convert normalized stick values to target speeds using gear, swap, and max slew.
-void GamepadPILOT::updateTargetSpeeds(float dt) {
-    float xScaled = applyStickCurve(MAIN_STICK_X);
-    float yScaled = applyStickCurve(MAIN_STICK_Y);
+void GamepadPILOT::updateTargetSpeeds(float deltaTime) {
+    float xScaled = applyStickCurve(mainStickX());
+    float yScaled = applyStickCurve(mainStickY());
 
     float speedMultiplier = SPEED_MULTIPLIERS[currentGearIndex];
 
-    #if USE_DPAD_SLEWING == 1
+#if USE_DPAD_SLEWING == 1
     if (dpad != 0) {
         // Digital D-pad:
         // dpad up:1, down:2, right:4, left:8
@@ -286,7 +299,7 @@ void GamepadPILOT::updateTargetSpeeds(float dt) {
 
         speedMultiplier = DPAD_SPEED_MULTIPLIERS[currentGearIndex];
     }
-    #endif
+#endif
 
     float invX = activeSwapEW ? -1.0f : 1.0f;
     float invY = activeSwapNS ? -1.0f : 1.0f;
@@ -294,14 +307,14 @@ void GamepadPILOT::updateTargetSpeeds(float dt) {
     targetSpeedXNorm = xScaled * speedMultiplier * invX; //(-1..1)
     targetSpeedYNorm = yScaled * speedMultiplier * invY;
 
-    #if ENABLE_SAT_TRACKING_FEATURE == 1
+#if ENABLE_SAT_TRACKING_FEATURE == 1
     if (satelliteTracker.isActive() || satelliteTracker.isRecording()) {
         // Control step (getPosition, orbit prediction, PI) only on the send tick,
         // so every computed speed is actually sent. Orbit steering: alt-az, GEM and FORK
         // (ALTALT not yet supported -> simple integrator only).
         bool controlTick = (pollCounter + 1 >= COMMAND_INTERVAL_MULTIPLE);
         bool orbitSteerAllowed = (mountType == ALTAZM || mountType == GEM || mountType == FORK);
-        satelliteTracker.update(dt, targetSpeedXNorm, targetSpeedYNorm,
+        satelliteTracker.update(deltaTime, targetSpeedXNorm, targetSpeedYNorm,
                                 activeMaxSlewSpeedRad,
                                 targetSpeedX, targetSpeedY,
                                 controlTick, orbitSteerAllowed);
@@ -311,9 +324,9 @@ void GamepadPILOT::updateTargetSpeeds(float dt) {
             if (ctl && ctl->isConnected()) ctl->playDualRumble(0, 150, 0x80, 0x40);
         }
     } else
-    #endif
+#endif
     {
-    targetSpeedX = targetSpeedXNorm * activeMaxSlewSpeedRad; //(rad)
+    targetSpeedX = targetSpeedXNorm * activeMaxSlewSpeedRad;
     targetSpeedY = targetSpeedYNorm * activeMaxSlewSpeedRad;
     }
 
@@ -321,74 +334,63 @@ void GamepadPILOT::updateTargetSpeeds(float dt) {
     applyLimits(targetSpeedX, targetSpeedY);
 }
 
-// Check for limit error. When error occurs ony allow movement for a short amount of time, then sticks need to be centered again.
-void GamepadPILOT::applyLimits(float &targetSpeedX, float &targetSpeedY) {
+// Check for limit error. When error occurs only allow movement for a short amount of time, 
+// then sticks need to be centered again.
+void GamepadPILOT::applyLimits(float &speedX, float &speedY) {
     // If tracking is active and outside limits, stop tracking immediately
-    #if ENABLE_SAT_TRACKING_FEATURE == 1
+#if ENABLE_SAT_TRACKING_FEATURE == 1
     if (limits.isError() && satelliteTracker.isActive()) {
         satelliteTracker.disable();
         VLF("MSG: satellite tracking disabled due to limit error.");
     }
-    #endif
-    
-    
-    
+#endif
+
     // Normal operation: mount is inside limits.
     if (!limits.isError()) {
         recoveryState = RecoveryState::IDLE;
-        return; 
+        return;
     }
-
-    ControllerPtr myCtl = myControllers[0];
-
-
-    bool sticksCentered = IS_MAIN_STICK_CENTERED;
-
 
     // State Machine for Limit Recovery
     if (recoveryState == RecoveryState::IDLE) {
         recoveryState = RecoveryState::WAITING_FOR_CENTER;
-        myCtl->playDualRumble(0, 100, 0x80, 0x40);
+        ControllerPtr ctl = myControllers[0];
+        if (ctl && ctl->isConnected()) ctl->playDualRumble(0, 100, 0x80, 0x40);
     }
 
-    if (recoveryState == RecoveryState::WAITING_FOR_CENTER && sticksCentered) {
+    if (recoveryState == RecoveryState::WAITING_FOR_CENTER && mainStickCentered()) {
         recoveryState = RecoveryState::ARMED;
     }
 
-    if (recoveryState == RecoveryState::ARMED && !sticksCentered) {
+    if (recoveryState == RecoveryState::ARMED && !mainStickCentered()) {
         recoveryState = RecoveryState::MOVING;
         limitRecoveryWindowStart = millis();
     }
 
     // re-arm when sticks are centered while in MOVING state
-    if (recoveryState == RecoveryState::MOVING && sticksCentered) {
+    if (recoveryState == RecoveryState::MOVING && mainStickCentered()) {
         recoveryState = RecoveryState::ARMED;
     }
 
     // Calculate if the recovery window is still active
-    bool windowOpen = (recoveryState == RecoveryState::MOVING) && 
+    bool windowOpen = (recoveryState == RecoveryState::MOVING) &&
                       (millis() - limitRecoveryWindowStart < LIMIT_RECOVERY_WINDOW_MS);
 
     // ENFORCE SAFETY RULES:
     // Force a full stop if:
     // 1. The sticks are dead-centered (blocks other background processes from moving it)
     // 2. OR not armed yet, and the moving window has already expired.
-    if (sticksCentered || (recoveryState != RecoveryState::ARMED && !windowOpen)) {
-        targetSpeedX = 0.0f;
-        targetSpeedY = 0.0f;
-        //smoothTargetSpeedX = 0.0f;
-        //smoothTargetSpeedY = 0.0f;
+    if (mainStickCentered() || (recoveryState != RecoveryState::ARMED && !windowOpen)) {
+        speedX = 0.0f;
+        speedY = 0.0f;
     }
 }
 
 
-
-
-
 // Smoothly accelerate towards the current target speeds using delta time.
-void GamepadPILOT::calculateSmoothSpeeds(float dt) {
-    smoothTargetSpeedX = applyAcceleration(targetSpeedX, smoothTargetSpeedX, ACCEL_RATE, dt);
-    smoothTargetSpeedY = applyAcceleration(targetSpeedY, smoothTargetSpeedY, ACCEL_RATE, dt);
+void GamepadPILOT::calculateSmoothSpeeds(float deltaTime) {
+    smoothTargetSpeedX = applyAcceleration(targetSpeedX, smoothTargetSpeedX, ACCEL_RATE, deltaTime);
+    smoothTargetSpeedY = applyAcceleration(targetSpeedY, smoothTargetSpeedY, ACCEL_RATE, deltaTime);
 }
 
 
@@ -396,18 +398,19 @@ void GamepadPILOT::calculateSmoothSpeeds(float dt) {
 // Slew command, acceleration, and cleanup helpers
 // ============================================================================
 
-// Temporarily raise axis acceleration while slewing to be able to set custom acceleration and have decelleration (Onstepx does not do decelleration with autoslew).
+// Temporarily raise axis acceleration while slewing to be able to set custom acceleration 
+// and have decelleration (OnStepX does not apply deceleration to direct autoslew).
 void GamepadPILOT::maybeEnableHighAcceleration() {
     if (!accelIsHigh && (smoothTargetSpeedX != 0.0f || smoothTargetSpeedY != 0.0f)) {
-        axis1.setSlewAccelerationRate(10.0f);
-        axis2.setSlewAccelerationRate(10.0f);
+        axis1.setSlewAccelerationRate(HIGH_SLEW_ACCEL_RAD_S2);
+        axis2.setSlewAccelerationRate(HIGH_SLEW_ACCEL_RAD_S2);
         accelIsHigh = true;
     }
 }
 
 // Run every poll tick. setSlewAccelerationRate() is silently ignored unless
 // autoRate == AR_NONE, so keep trying until both axes are idle.
-void GamepadPILOT::restoreAccelerationWhenIdle() {  
+void GamepadPILOT::restoreAccelerationWhenIdle() {
     if (!accelIsHigh) return;
     if (axis1.isSlewing() || axis2.isSlewing()) return;
 
@@ -421,7 +424,7 @@ void GamepadPILOT::restoreAccelerationWhenIdle() {
 void GamepadPILOT::sendSlewCommands() {
     // control step on the same tick the command is sent
     if (++pollCounter >= COMMAND_INTERVAL_MULTIPLE) {
-pollCounter = 0;
+        pollCounter = 0;
 
 #if PLOTTER_DEBUG == 1
         // Serial Plotter Output with Labels
@@ -431,8 +434,6 @@ pollCounter = 0;
         if (smoothTargetSpeedX != lastSentSpeedX || smoothTargetSpeedY != lastSentSpeedY) {
             maybeEnableHighAcceleration();
 
-            Direction dirX, dirY;
-
             // -----------------------------------------------------------------
             // Axis 2 speed inversion depending on mount type and pier side
             //   smoothTargetSpeedY < 0  ->  North / up
@@ -440,7 +441,7 @@ pollCounter = 0;
             // -----------------------------------------------------------------
             float pierSideCorrectedY = smoothTargetSpeedY;
 
-            // for GEM on pier side west, invert Y 
+            // for GEM on pier side west, invert Y
             if (mountType == GEM && mount.getPosition().pierSide == PIER_SIDE_WEST) {
                 pierSideCorrectedY = -pierSideCorrectedY;
             }
@@ -449,29 +450,29 @@ pollCounter = 0;
             if (smoothTargetSpeedX == 0.0f) {
                 if (axis1.isSlewing()) axis1.autoSlew(DIR_FORWARD, 0.0f);
             } else {
-                dirX = (smoothTargetSpeedX > 0.0f) ? DIR_FORWARD : DIR_REVERSE;
-                axis1.autoSlew(dirX, abs(smoothTargetSpeedX));
+                Direction dirX = (smoothTargetSpeedX > 0.0f) ? DIR_FORWARD : DIR_REVERSE;
+                axis1.autoSlew(dirX, fabsf(smoothTargetSpeedX));
             }
-            
+
             // North/South (Axis 2)
             if (pierSideCorrectedY == 0.0f) {
                 if (axis2.isSlewing()) axis2.autoSlew(DIR_FORWARD, 0.0f);
             } else {
-                dirY = (pierSideCorrectedY > 0.0f) ? DIR_REVERSE : DIR_FORWARD;
-                axis2.autoSlew(dirY, abs(pierSideCorrectedY));
+                Direction dirY = (pierSideCorrectedY > 0.0f) ? DIR_REVERSE : DIR_FORWARD;
+                axis2.autoSlew(dirY, fabsf(pierSideCorrectedY));
             }
 
             lastSentSpeedX = smoothTargetSpeedX;
             lastSentSpeedY = smoothTargetSpeedY;
 
-            //clear isSlewing flag, only when targetSpeed == 0 so quick direction reversal does not trigger it
+            // Clear isSlewing flag, only when targetSpeed == 0 so quick direction reversal does not trigger it
             if (lastSentSpeedX == 0.0f && lastSentSpeedY == 0.0f &&
                 targetSpeedX == 0.0f && targetSpeedY == 0.0f) {
                 SERIAL_LOCAL.transmit(":Qe#");
                 SERIAL_LOCAL.transmit(":Qn#");
             }
         }
-        
+
         restoreAccelerationWhenIdle();
     }
 }
@@ -484,22 +485,22 @@ void GamepadPILOT::handleSafetyStop(bool connectionLost) {
     // Safety State: Always force target speeds to zero while watchdog or connection loss is active
     targetSpeedX = 0.0f;
     targetSpeedY = 0.0f;
-    
+
     // Relock the mount if the connection is physically lost
     if (connectionLost) {
         isUnlocked = (USE_UNLOCK_SEQUENCE == 0);
-        currentUnlockStep = STEP_LOCKED;
+        currentUnlockStep = UnlockStep::LOCKED;
         holdStartTime = 0;
-    
-        #if ENABLE_SAT_TRACKING_FEATURE == 1
+
+#if ENABLE_SAT_TRACKING_FEATURE == 1
         // Immediately stop satellite tracking if the controller disconnects
         satelliteTracker.disable();
-        #endif
+#endif
     }
 
     // Notify once per contiguous safety-stop event.
     if (!safetyStopNoticeSent) {
-       if (connectionLost) {
+        if (connectionLost) {
             VLF("MSG: Connection Lost! Sending Safety Stop...");
         } else {
             VLF("MSG: Watchdog Triggered (Stale Data)! Sending Safety Stop...");
@@ -514,31 +515,30 @@ void GamepadPILOT::handleSafetyStop(bool connectionLost) {
 
 // Handles the unlock sequence and returns whether the mount is currently unlocked.
 // When USE_UNLOCK_SEQUENCE == 0, this function always returns true.
-bool GamepadPILOT::handleUnlockSequence(uint8_t dpad) {
+bool GamepadPILOT::handleUnlockSequence(uint8_t currentDpad) {
 #if USE_UNLOCK_SEQUENCE == 1
 
     if (!isUnlocked) {
-        ControllerPtr myCtl = myControllers[0];
-
         // dpad values: up:1 ; down:2 ; right:4 ; left:8
-        if (dpad == 2) { // Holding DOWN
-            if (currentUnlockStep == STEP_LOCKED) {
+        if (currentDpad == 2) { // Holding DOWN
+            if (currentUnlockStep == UnlockStep::LOCKED) {
                 if (holdStartTime == 0) holdStartTime = millis();
                 if (millis() - holdStartTime >= UNLOCK_HOLD_MS) {
-                    currentUnlockStep = STEP_WAIT_FOR_UP;
+                    currentUnlockStep = UnlockStep::WAIT_FOR_UP;
                     holdStartTime = 0;
                     waitForUpStartTime = 0; // Window starts only after DOWN is released
-                    myCtl->playDualRumble(0, 100, 0x80, 0x40);
+                    ControllerPtr ctl = myControllers[0];
+                    if (ctl && ctl->isConnected()) ctl->playDualRumble(0, 100, 0x80, 0x40);
                     VLF("MSG: Unlock Stage 1 complete. Now hold UP.");
                 }
             }
-        } else if (dpad == 1) { // Holding UP
-            if (currentUnlockStep == STEP_WAIT_FOR_UP) {
+        } else if (currentDpad == 1) { // Holding UP
+            if (currentUnlockStep == UnlockStep::WAIT_FOR_UP) {
                 if (holdStartTime == 0) {
                     // First UP press after DOWN release: check the 2s window.
                     if (waitForUpStartTime == 0 ||
                         (millis() - waitForUpStartTime) > 2000) {
-                        currentUnlockStep = STEP_LOCKED;
+                        currentUnlockStep = UnlockStep::LOCKED;
                         waitForUpStartTime = 0;
                         VLF("MSG: Unlock sequence reset: UP started too late.");
                     } else {
@@ -546,30 +546,31 @@ bool GamepadPILOT::handleUnlockSequence(uint8_t dpad) {
                     }
                 }
 
-                if (currentUnlockStep == STEP_WAIT_FOR_UP && holdStartTime != 0) {
+                if (currentUnlockStep == UnlockStep::WAIT_FOR_UP && holdStartTime != 0) {
                     if (millis() - holdStartTime >= UNLOCK_HOLD_MS) {
                         isUnlocked = true;
                         waitForUpStartTime = 0;
                         VLF("MSG: GamepadPILOT UNLOCKED.");
-                        myCtl->playDualRumble(0, 150, 0x80, 0x40);
+                        ControllerPtr ctl = myControllers[0];
+                        if (ctl && ctl->isConnected()) ctl->playDualRumble(0, 150, 0x80, 0x40);
                     }
                 }
             }
-        } else if (dpad != 0) { // Pressed something else (Left/Right)
-            currentUnlockStep = STEP_LOCKED;
+        } else if (currentDpad != 0) { // Pressed something else (Left/Right)
+            currentUnlockStep = UnlockStep::LOCKED;
             holdStartTime = 0;
             waitForUpStartTime = 0;
         } else { // D-pad released
             holdStartTime = 0;
 
-            if (currentUnlockStep == STEP_WAIT_FOR_UP) {
+            if (currentUnlockStep == UnlockStep::WAIT_FOR_UP) {
                 if (waitForUpStartTime == 0) {
                     // DOWN was just released; start the 2 second window.
                     waitForUpStartTime = millis();
                 } else if ((millis() - waitForUpStartTime) > 2000) {
-                    currentUnlockStep = STEP_LOCKED;
+                    currentUnlockStep = UnlockStep::LOCKED;
                     waitForUpStartTime = 0;
-                    VLF("MSG: Unlock sequence reset: UP not started within 3s.");
+                    VLF("MSG: Unlock sequence reset: UP not started within 2s.");
                 }
             }
         }
@@ -583,12 +584,12 @@ bool GamepadPILOT::handleUnlockSequence(uint8_t dpad) {
 }
 
 // Handle rising-edge button events and update lastBtns/lastDpad afterwards.
-void GamepadPILOT::handleButtonEvents(uint32_t btns, uint8_t dpad) {
+void GamepadPILOT::handleButtonEvents(uint32_t currentBtns, uint8_t currentDpad) {
     // Detect "Rising Edge" of the gear cycle button (pressed now, but wasn't before)
-    if ((btns & CYCLE_GEAR_BUTTON) && !(lastBtns & CYCLE_GEAR_BUTTON)) {
+    if (risingEdge(currentBtns, lastBtns, CYCLE_GEAR_BUTTON)) {
         currentGearIndex = (currentGearIndex + 1) % GEAR_COUNT;
         VLF(("MSG: Gear Changed! Current Multiplier: " + String(SPEED_MULTIPLIERS[currentGearIndex]) + "x").c_str());
-    
+
         // Rumble when the slowest gear (index 0) is selected
         if (currentGearIndex == 0) {
             ControllerPtr myCtl = myControllers[0];
@@ -600,14 +601,14 @@ void GamepadPILOT::handleButtonEvents(uint32_t btns, uint8_t dpad) {
     }
 
     // Detect "Rising Edge" of the swap toggle button
-    if ((btns & SWAP_TOGGLE_BUTTON) && !(lastBtns & SWAP_TOGGLE_BUTTON)) {
-        #if TOGGLE_SWAP_NS == 1
+    if (risingEdge(currentBtns, lastBtns, SWAP_TOGGLE_BUTTON)) {
+#if TOGGLE_SWAP_NS == 1
         activeSwapNS = !activeSwapNS;
-        #endif
-        
-        #if TOGGLE_SWAP_EW == 1
+#endif
+
+#if TOGGLE_SWAP_EW == 1
         activeSwapEW = !activeSwapEW;
-        #endif
+#endif
         String msg = "MSG: Orientation Swapped! ";
         msg += "N/S: " + String(activeSwapNS ? "Inv" : "Norm");
         msg += " E/W: " + String(activeSwapEW ? "Inv" : "Norm");
@@ -615,19 +616,19 @@ void GamepadPILOT::handleButtonEvents(uint32_t btns, uint8_t dpad) {
     }
 
     // Detect "Rising Edge" of the tracking toggle button
-    if ((btns & TRACKING_TOGGLE_BUTTON) && !(lastBtns & TRACKING_TOGGLE_BUTTON)) {
+    if (risingEdge(currentBtns, lastBtns, TRACKING_TOGGLE_BUTTON)) {
         if (mount.isTracking()) {
-            SERIAL_LOCAL.transmit(":Td#"); // turn tracking off
+            commandBroker.send(":Td#"); // turn tracking off
             VLF("MSG: tracking OFF");
         } else {
-            SERIAL_LOCAL.transmit(":Te#"); // turn tracking on
+            commandBroker.send(":Te#"); // turn tracking on
             VLF("MSG: tracking ON");
         }
     }
 
     // Satellite tracking button state machine
-    #if ENABLE_SAT_TRACKING_FEATURE == 1
-    if (btns & SATELLITE_TRACKING_BUTTON) {
+#if ENABLE_SAT_TRACKING_FEATURE == 1
+    if (currentBtns & SATELLITE_TRACKING_BUTTON) {
         // Button is currently held down.
         if (!(lastBtns & SATELLITE_TRACKING_BUTTON)) {
             // Rising edge: button was just pressed.
@@ -659,27 +660,28 @@ void GamepadPILOT::handleButtonEvents(uint32_t btns, uint8_t dpad) {
             satelliteTrackingPressStart = 0;
         }
     }
-    #endif
+#endif
 
     // Custom LX200 commands, sent once per rising edge.
-    #define CUSTOM_COMMAND(buttonTrigger, dpadTrigger, command) \
-        if (risingEdge(btns, lastBtns, (buttonTrigger)) || \
-            risingEdge(dpad, lastDpad, (dpadTrigger))) { \
+#define CUSTOM_COMMAND(buttonTrigger, dpadTrigger, command) \
+        if (risingEdge(currentBtns, lastBtns, (buttonTrigger)) || \
+            risingEdge(currentDpad, lastDpad, (dpadTrigger))) { \
             SERIAL_LOCAL.transmit(command); \
             VL("MSG: Custom command sent: "); \
             VLF(command); \
         }
 
-    #if ENABLE_SAT_TRACKING_FEATURE == 1
+#if ENABLE_SAT_TRACKING_FEATURE == 1
     if (!satelliteTracker.isActive()) {
-    #endif
+#endif
         CUSTOM_COMMANDS
-    #if ENABLE_SAT_TRACKING_FEATURE == 1
+#if ENABLE_SAT_TRACKING_FEATURE == 1
     }
-    #endif
+#endif
+#undef CUSTOM_COMMAND
 
-    lastBtns = btns;
-    lastDpad = dpad;
+    lastBtns = currentBtns;
+    lastDpad = currentDpad;
 }
 
 // ============================================================================
@@ -708,12 +710,12 @@ void GamepadPILOT::handleVerboseSystemStats() {
         // Direct serial output (no macro dependency)
         Serial.println("--- plugin memory stats ---");
         Serial.printf("MSG: free heap: %u bytes | min free since boot: %u bytes | largest free block: %u bytes\n",
-                      (unsigned)freeHeap, (unsigned)minFreeHeap, (unsigned)largestBlock);
-        Serial.printf("MSG: Unused Plugin Stack: %u / 4096 bytes\n", (unsigned)unusedStack);
+                      static_cast<unsigned>(freeHeap), static_cast<unsigned>(minFreeHeap), static_cast<unsigned>(largestBlock));
+        Serial.printf("MSG: Unused Plugin Stack: %u / 4096 bytes\n", static_cast<unsigned>(unusedStack));
 
         TaskHandle_t web = xTaskGetHandle("WebSvrTask");   // NULL if the website plugin is off
         if (web) Serial.printf("MSG: Unused WebSvrTask stack: %u / 10000 bytes\n",
-                               (unsigned)uxTaskGetStackHighWaterMark(web));
+                               static_cast<unsigned>(uxTaskGetStackHighWaterMark(web)));
 
         lastStatsTime = millis();
     }
@@ -721,19 +723,25 @@ void GamepadPILOT::handleVerboseSystemStats() {
 
 // Raw debug mode: read raw Bluepad32 values and print them at the configured interval.
 void GamepadPILOT::handleRawDebugMode(ControllerPtr myCtl) {
-    static uint32_t lastLogTime = 0; 
+    static uint32_t lastLogTime = 0;
 
-    int32_t xVal = myCtl->axisX();   // left stick X
-    int32_t yVal = myCtl->axisY();   // left stick Y
-    int32_t rxVal = myCtl->axisRX(); // right stick X
-    int32_t ryVal = myCtl->axisRY(); // right stick Y
-    uint32_t btns = myCtl->buttons();  // button state
-    uint8_t dpad = myCtl->dpad();  // D pad
+    int32_t rawX = myCtl->axisX();     // left stick X
+    int32_t rawY = myCtl->axisY();     // left stick Y
+    int32_t rawRX = myCtl->axisRX();   // right stick X
+    int32_t rawRY = myCtl->axisRY();   // right stick Y
+    uint32_t rawBtns = myCtl->buttons(); // button state
+    uint8_t rawDpad = myCtl->dpad();   // D pad
 
     if (millis() - lastLogTime > RAW_DEBUG_PRINT_INTERVAL) {
         bool hasData = myCtl->hasData();
         Serial.printf("MSG: RAW - Data: %s | LX: %4d | LY: %4d | RX: %4d | RY: %4d | BTN: %u | DPD: %u\n",
-        hasData ? "YES" : "NO ", (int)xVal, (int)yVal, (int)rxVal, (int)ryVal, (unsigned int)btns, (unsigned int)dpad);
+        hasData ? "YES" : "NO ",
+            static_cast<int>(rawX),
+            static_cast<int>(rawY),
+            static_cast<int>(rawRX),
+            static_cast<int>(rawRY),
+            static_cast<unsigned>(rawBtns),
+            static_cast<unsigned>(rawDpad));
 
         lastLogTime = millis();
     }
@@ -741,14 +749,21 @@ void GamepadPILOT::handleRawDebugMode(ControllerPtr myCtl) {
 
 // Serial Plotter output: one line containing target, smooth, and acceleration state.
 void GamepadPILOT::handlePlotterDebug() {
-    Serial.printf("TargetX:%.3f,SmoothX:%.3f,TargetY:%.3f,SmoothY:%.3f,AccelHigh:%d\n", targetSpeedX, smoothTargetSpeedX, targetSpeedY, smoothTargetSpeedY, accelIsHigh);
+#if PLOTTER_DEBUG_PRINT_INTERVAL > 0
+    static uint32_t lastPrintMs = 0;
+    uint32_t now = millis();
+    if (now - lastPrintMs < PLOTTER_DEBUG_PRINT_INTERVAL) return;
+    lastPrintMs = now;
+#endif
+    Serial.printf("TargetX:%.3f,SmoothX:%.3f,TargetY:%.3f,SmoothY:%.3f,AccelHigh:%d\n",
+                targetSpeedX, smoothTargetSpeedX, targetSpeedY, smoothTargetSpeedY, accelIsHigh);
 }
 
 // Axis state debug: print axis frequencies, slewing state, and limit status.
 void GamepadPILOT::handleAxisStateDebug() {
     static uint32_t lastStatusPrint = 0;
     if (millis() - lastStatusPrint > 500) {
-        Serial.printf("DEBUG: Ax1 Freq: %.4f | Slew: %s, Ax2 Freq: %.4f | Slew: %s | Limits: %s (%s)\n", 
+        Serial.printf("DEBUG: Ax1 Freq: %.4f | Slew: %s, Ax2 Freq: %.4f | Slew: %s | Limits: %s (%s)\n",
             axis1.getFrequency(), axis1.isSlewing() ? "YES" : "NO",
             axis2.getFrequency(), axis2.isSlewing() ? "YES" : "NO",
             limits.isError() ? "OUTSIDE" : "INSIDE",
@@ -800,12 +815,10 @@ void GamepadPILOT::init() {
 #endif
 
     // Fetch base slew speed from configuration and convert to rad/s.
-    activeMaxSlewSpeedRad = (float)SLEW_RATE_BASE_DESIRED * 0.01745329f;
+    activeMaxSlewSpeedRad = static_cast<float>(SLEW_RATE_BASE_DESIRED) * DEG_TO_RAD_F;
 
     // Calculate original acceleration: a = v^2 / (2 * d)
-    float v_rad = activeMaxSlewSpeedRad;
-    float d_rad = (float)SLEW_ACCELERATION_DIST * 0.01745329f;
-    originalAccel = (d_rad > 0) ? (v_rad * v_rad) / (2.0f * d_rad) : 10.0f;
+    originalAccel = accelerationFromMaxSpeed(activeMaxSlewSpeedRad);
 
     // Set initial acceleration on both axes.
     axis1.setSlewAccelerationRate(originalAccel);
@@ -828,10 +841,10 @@ void GamepadPILOT::init() {
     // Satellite tracking sample buffers: one heap block, allocated once (not in static DRAM)
     if (satelliteTracker.allocateBuffers()) {
         VF("MSG: GamepadPILOT satellite tracking buffers allocated, bytes: ");
-        VL((unsigned)satelliteTracker.bufferBytes());
+        VL(static_cast<unsigned>(satelliteTracker.bufferBytes()));
     } else {
         DF("WRN: GamepadPILOT satellite tracking disabled, could not allocate bytes: ");
-        DL((unsigned)satelliteTracker.bufferBytes());
+        DL(static_cast<unsigned>(satelliteTracker.bufferBytes()));
     }
 #endif
 

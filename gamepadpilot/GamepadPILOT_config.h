@@ -142,6 +142,7 @@ static const float DPAD_SPEED_MULTIPLIERS[] = {0.03f, 0.2f, 1.0f};  // 0.03f, 0.
 #define RAW_DEBUG_PRINT_INTERVAL 250       // 250,  in ms
 #define AXIS_STATE_DEBUG 0                 // 0,    Shows frequency and slew status for both axes
 #define PLOTTER_DEBUG 0                    // 0,    Enables output formatted for the Arduino Serial Plotter
+#define PLOTTER_DEBUG_PRINT_INTERVAL 100   // 100,  minimum ms between plotter lines (0 = every send tick)
 #define VERBOSE_SYSTEM_STATS 0             // 0,    Shows system stats while running the regular tasks. 
 #define TIMING_DEBUG 0                     // 0,    Shows tick duration of the entire plugin
 #define TIMING_DEBUG_PRINT_INTERVAL 10     // 10,   if shorter than POLL_INTERVAL, sends every tick, if higher, might not catch every spike

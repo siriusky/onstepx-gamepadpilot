@@ -96,19 +96,14 @@
 #endif
 
 
-//todo:
-
-//ALTALT support
-//if necessary (cpu time) float version of fit / root bisection algorithm
-
 //mount.getPosition() unit: radians
 //r     ra 0..2pi 0h..24h in absolute sky coordinates
 //h     local hour angle
 //d     dec -0.5pi..0.5pi -90deg..90deg
 //a     altitude -0.5pi..0.5pi -90deg..90deg
 //z     azimuth 0 at north, east is positive west is negative, south is pi
-//aa1   ?
-//aa2   ?
+//aa1   altalt axis1 pointing north
+//aa2   altalt axis2
 //a1    axis1 physical
 //a2    axis2 physical, -0.5pi to 0.5pi
 //pier  pierside
@@ -177,105 +172,109 @@
 
 
 class SatelliteTrackingEngine {
+    // ---------------------------------------------------------------------
+    // Contents
+    //   Public : update, state queries, buffer allocation, lifecycle, recording
+    //   Private: simple integrator, control step, trajectory, fitting,
+    //            speed limit hold, orbit steering, debug, stats
+    // ---------------------------------------------------------------------
 public:
 
-// ---------------------------------------------------------------------
-// update() – main satellite tracking math
-// ---------------------------------------------------------------------
-//   targetXNorm, targetYNorm : normalized stick input (-1 .. 1)
-//   maxSlewSpeedRad          : current maximum slew speed in rad/s
-//   targetXRad, targetYRad   : output references, final speed in rad/s
-// ---------------------------------------------------------------------
-void update(float dt, float targetXNorm, float targetYNorm,
-            float maxSlewSpeedRad, float &targetXRad, float &targetYRad,
-            bool controlTick = true, bool orbitSteerAllowed = false) {
+    // ---------------------------------------------------------------------
+    // update() – main satellite tracking math
+    // ---------------------------------------------------------------------
+    //   targetXNorm, targetYNorm : normalized stick input (-1 .. 1)
+    //   maxSlewSpeedRad          : current maximum slew speed in rad/s
+    //   targetXRad, targetYRad   : output references, final speed in rad/s
+    // ---------------------------------------------------------------------
+    void update(float dt, float targetXNorm, float targetYNorm,
+                float maxSlewSpeedRad, float &targetXRad, float &targetYRad,
+                bool controlTick = true, bool orbitSteerAllowed = false) {
 
-    // If recording, just store the sample and keep the stick command unchanged
-    if (recording) {
-        recordSample(targetXNorm, targetYNorm);
+        // If recording, store the sample and keep the stick command unchanged
+        if (recording) {
+            recordSample(targetXNorm, targetYNorm);
+            targetXRad = targetXNorm * maxSlewSpeedRad;
+            targetYRad = targetYNorm * maxSlewSpeedRad;
+            return;
+        }
+
+        if (!active) return;
+
+        // Returns false when tracking stopped (below horizon): send zero speed.
+        if (controlTick && !controlStep(maxSlewSpeedRad, orbitSteerAllowed)) {
+            targetXRad = 0.0f;
+            targetYRad = 0.0f;
+            return;
+        }
+
+        // Manual stick correction (every tick, normalized)
+        float manualXNorm = targetXNorm * SATELLITE_TRACKING_MANUAL_GAIN;
+        float manualYNorm = targetYNorm * SATELLITE_TRACKING_MANUAL_GAIN;
+
+        #if SATELLITE_ORBIT_ENABLE == 1
+        if (steering) {
+            // ORBIT MODE: commanded axis rates from the control step + manual correction.
+            // X = axis1 rate, Y = axis2 with Y < 0 = up -> Y = -axis2 rate.
+            // An axis in catch-up runs at max speed: manual input ignored on that axis.
+            if (catchDir[0] != 0) manualXNorm = 0.0f;
+            if (catchDir[1] != 0) manualYNorm = 0.0f;
+            float inv = (maxSlewSpeedRad > 0.0f) ? 1.0f / maxSlewSpeedRad : 0.0f;
+            targetXNorm =  axCmd[0] * inv + manualXNorm;
+            targetYNorm = -axCmd[1] * inv + manualYNorm;
+
+            // Manual corrections move the reference too, so the PI does not pull them back.
+            // Reset to 0 when a new orbit is accepted.
+            manualOffset[0] +=  manualXNorm * maxSlewSpeedRad * dt;
+            manualOffset[1] += -manualYNorm * maxSlewSpeedRad * dt;
+        } else
+        #endif
+        {
+            // SIMPLE MODE: integrated baseline + manual correction
+            trackingRateX += SATELLITE_TRACKING_INTEGRATION_GAIN * dt * manualXNorm;
+            trackingRateY += SATELLITE_TRACKING_INTEGRATION_GAIN * dt * manualYNorm;
+
+            // Clamp baseline to normalized range
+            if (trackingRateX > 1.0f)  trackingRateX = 1.0f;
+            else if (trackingRateX < -1.0f) trackingRateX = -1.0f;
+
+            if (trackingRateY > 1.0f)  trackingRateY = 1.0f;
+            else if (trackingRateY < -1.0f) trackingRateY = -1.0f;
+
+            // Final normalized speed = baseline + scaled manual correction
+            targetXNorm = trackingRateX + manualXNorm;
+            targetYNorm = trackingRateY + manualYNorm;
+
+            // Altitude/axis2 correction for axis1 (X), cos(axis2) from the control step
+            targetXNorm *= referenceCos2 / cachedCos2;
+        }
+
+        #if SATELLITE_ORBIT_ENABLE == 1
+        // Speed limit (simple mode): commanded speed (before clamping) at the limit on any axis.
+        // Sticky until the next control step evaluates it. Orbit mode uses the catch-up state.
+        if (!steering &&
+            (fabsf(targetXNorm) >= SATELLITE_ORBIT_SPEED_LIMIT_FRACTION ||
+             fabsf(targetYNorm) >= SATELLITE_ORBIT_SPEED_LIMIT_FRACTION)) mountAtLimit = true;
+        axClamped[0] = fabsf(targetXNorm) > 1.0f;   // per-axis anti-windup
+        axClamped[1] = fabsf(targetYNorm) > 1.0f;
+        #endif
+
+        // Clamp final normalized values
+        if (targetXNorm > 1.0f)  targetXNorm = 1.0f;
+        else if (targetXNorm < -1.0f) targetXNorm = -1.0f;
+
+        if (targetYNorm > 1.0f)  targetYNorm = 1.0f;
+        else if (targetYNorm < -1.0f) targetYNorm = -1.0f;
+
+        lastOutXNorm = targetXNorm;
+        lastOutYNorm = targetYNorm;
+
+        // Always convert normalized to rad/s and write to output references
         targetXRad = targetXNorm * maxSlewSpeedRad;
         targetYRad = targetYNorm * maxSlewSpeedRad;
-        return;
-    }
 
-    if (!active) return;
+    } // update()
 
-    // Control step (send tick only): 1x getPosition, 1x predict, PI, limits, fit.
-    // Returns false when tracking stopped (below horizon): send zero speed.
-    if (controlTick && !controlStep(maxSlewSpeedRad, orbitSteerAllowed)) {
-        targetXRad = 0.0f;
-        targetYRad = 0.0f;
-        return;
-    }
-
-    // Manual stick correction (every tick, normalized)
-    float manualXNorm = targetXNorm * SATELLITE_TRACKING_MANUAL_GAIN;
-    float manualYNorm = targetYNorm * SATELLITE_TRACKING_MANUAL_GAIN;
-
-    #if SATELLITE_ORBIT_ENABLE == 1
-    if (steering) {
-        // ORBIT MODE: commanded axis rates from the control step + manual correction.
-        // X = axis1 rate, Y = axis2 with Y < 0 = up -> Y = -axis2 rate.
-        // An axis in catch-up runs at max speed: manual input ignored on that axis.
-        if (catchDir[0] != 0) manualXNorm = 0.0f;
-        if (catchDir[1] != 0) manualYNorm = 0.0f;
-        float inv = (maxSlewSpeedRad > 0.0f) ? 1.0f / maxSlewSpeedRad : 0.0f;
-        targetXNorm =  axCmd[0] * inv + manualXNorm;
-        targetYNorm = -axCmd[1] * inv + manualYNorm;
-
-        // Manual corrections move the reference too, so the PI does not pull them back.
-        // Reset to 0 when a new orbit is accepted.
-        manualOffset[0] +=  manualXNorm * maxSlewSpeedRad * dt;
-        manualOffset[1] += -manualYNorm * maxSlewSpeedRad * dt;
-    } else
-    #endif
-    {
-        // SIMPLE MODE: integrated baseline + manual correction
-        trackingRateX += SATELLITE_TRACKING_INTEGRATION_GAIN * dt * manualXNorm;
-        trackingRateY += SATELLITE_TRACKING_INTEGRATION_GAIN * dt * manualYNorm;
-
-        // Clamp baseline to normalized range
-        if (trackingRateX > 1.0f)  trackingRateX = 1.0f;
-        else if (trackingRateX < -1.0f) trackingRateX = -1.0f;
-
-        if (trackingRateY > 1.0f)  trackingRateY = 1.0f;
-        else if (trackingRateY < -1.0f) trackingRateY = -1.0f;
-
-        // Final normalized speed = baseline + scaled manual correction
-        targetXNorm = trackingRateX + manualXNorm;
-        targetYNorm = trackingRateY + manualYNorm;
-
-        // Altitude/axis2 correction for axis1 (X), cos(axis2) from the control step
-        targetXNorm *= referenceCos2 / cachedCos2;
-    }
-
-    #if SATELLITE_ORBIT_ENABLE == 1
-    // Speed limit (simple mode): commanded speed (before clamping) at the limit on any axis.
-    // Sticky until the next control step evaluates it. Orbit mode uses the catch-up state.
-    if (!steering &&
-        (fabsf(targetXNorm) >= SATELLITE_ORBIT_SPEED_LIMIT_FRACTION ||
-         fabsf(targetYNorm) >= SATELLITE_ORBIT_SPEED_LIMIT_FRACTION)) mountAtLimit = true;
-    axClamped[0] = fabsf(targetXNorm) > 1.0f;   // per-axis anti-windup
-    axClamped[1] = fabsf(targetYNorm) > 1.0f;
-    #endif
-
-    // Clamp final normalized values
-    if (targetXNorm > 1.0f)  targetXNorm = 1.0f;
-    else if (targetXNorm < -1.0f) targetXNorm = -1.0f;
-
-    if (targetYNorm > 1.0f)  targetYNorm = 1.0f;
-    else if (targetYNorm < -1.0f) targetYNorm = -1.0f;
-
-    lastOutXNorm = targetXNorm;
-    lastOutYNorm = targetYNorm;
-
-    // Always convert normalized to rad/s and write to output references
-    targetXRad = targetXNorm * maxSlewSpeedRad;
-    targetYRad = targetYNorm * maxSlewSpeedRad;
-
-} //void (update)
-
-    ///////////////////////////////////////////////////////////////////////////////
 
     // =====================================================================
     // State query helpers
@@ -293,7 +292,7 @@ void update(float dt, float targetXNorm, float targetYNorm,
     // Returns false if malloc failed: then enable()/startRecording() do nothing.
     bool allocateBuffers() {
         if (buffersReady()) return true;
-        uint8_t* p = (uint8_t*)malloc(bufferBytes());
+        uint8_t* p = static_cast<uint8_t*>(malloc(bufferBytes()));
         if (p == nullptr) return false;
 
         // All element types are 4-byte aligned, malloc returns >= 4-byte aligned memory
@@ -347,17 +346,17 @@ void update(float dt, float targetXNorm, float targetYNorm,
             cachedCos2 = referenceCos2;
             lastOutXNorm = trackingRateX;
             lastOutYNorm = trackingRateY;
-            
+
             #if SATELLITE_ORBIT_ENABLE == 1
             // New session: coordinate recording starts with the simple tracker
             sessionStartMillis = millis();
             trajectorySampleCount = 0;
             trajectoryRingIndex = 0;
-            lastTrajectorySampleTime = sessionStartMillis - SATELLITE_ORBIT_SAMPLE_INTERVAL_MS; // sample immediately
-            lastFitTime = sessionStartMillis;
+            lastSampleMs = sessionStartMillis - SATELLITE_ORBIT_SAMPLE_INTERVAL_MS; // sample immediately
+            lastFitMs = sessionStartMillis;
             orbitModel.reset();
             candidateModel.reset();
-            candidateModel.setLatitude((float)site.location.latitude);
+            candidateModel.setLatitude(static_cast<float>(site.location.latitude));
             mountAtLimit = false;
             speedHold = false;
             lastLimitMs = 0;
@@ -368,7 +367,7 @@ void update(float dt, float targetXNorm, float targetYNorm,
             lastDevDeg = -1.0f;
             resetSteeringState();
             #if SATELLITE_STATS_PRINT == 1
-            lastStatsPrintMs = sessionStartMillis;   // first print after interval from start
+            lastStatsMs = sessionStartMillis;   // first print after interval from start
             lastClosestTca = 0.0f;
             lastClosestMaxElevDeg = 0.0f;
             hasClosestInfo = false;
@@ -425,7 +424,7 @@ void update(float dt, float targetXNorm, float targetYNorm,
 private:
 
     // =====================================================================
-    // simple tracking and stuff
+    // Simple integrator state and recording
     // =====================================================================
 
     // ---------------------------------------------------------------------
@@ -470,7 +469,6 @@ private:
     bool recording = false;
     bool equatorial = false;       // GEM / FORK: axis1 = HA, axis2 = Dec (set in enable())
     bool horizonStop = false;      // set when tracking stopped below the horizon
-    //uint32_t lastPrintMillis = 0;
     float referenceAxis2 = 0.0f;
     float referenceCos2 = 0.0f;
 
@@ -481,9 +479,9 @@ private:
     float lastOutXNorm = 0.0f;     // last normalized output (for fallback to simple mode)
     float lastOutYNorm = 0.0f;
 
-    // ---------------------------------------------------------------------
-    // Control step: runs on the send tick only (controlTick from the caller)
-    // ---------------------------------------------------------------------
+    // =====================================================================
+    // Control step (runs on the send tick only)
+    // =====================================================================
     // Mount position with alt/az (.a/.z) AND HA/Dec (.h/.d) filled on every mount type.
     //   ALTAZ: getPosition() (CR_MOUNT_EQU) converts horToEqu -> h/d also valid.
     //   eq + TOPOCENTRIC: the refraction step (equToHor, refrac, horToEqu) leaves
@@ -506,15 +504,9 @@ private:
         uint32_t now = millis();
         float tNow = (now - sessionStartMillis) * 0.001f;
 
-        //unsigned long predictStartUs = micros();//predict debug
-
         // One prediction per control step, shared by steering, trigger B, catch-up, debug.
         // Directly in axis coordinates (axTarget / axRate) + altitude for the horizon check.
         predValid = orbitModel.isValid() && predictOrbitAxes(tNow);
-
-        //unsigned long predictElapsedUs = micros() - predictStartUs;//predict debug
-        //Serial.printf("Predict_call_us:%u\n", predictElapsedUs);
-
 
         // Horizon stop: orbit prediction or mount below the horizon (cached values only)
         if (cachedPos.a < 0.0f || (predValid && predAlt < 0.0f)) {
@@ -540,7 +532,7 @@ private:
         // Sampling and orbit fit (may accept a new orbit -> manual offset reset).
         // Also sample right before a fit, so the newest sample (the point the new orbit
         // passes through) is the current position and recent manual corrections are kept.
-        if (now - lastTrajectorySampleTime >= SATELLITE_ORBIT_SAMPLE_INTERVAL_MS || fitDue(now))
+        if (now - lastSampleMs >= SATELLITE_ORBIT_SAMPLE_INTERVAL_MS || fitDue(now))
             sampleTrajectory(now);
         updateOrbitFit(now);
 
@@ -550,14 +542,14 @@ private:
         if (wantSteer != steering) switchMode(wantSteer, tNow);
 
         if (steering) piStep(maxSlewSpeedRad, now);
-        
+
         #if SATELLITE_STATS_PRINT == 1
-        if (now - lastStatsPrintMs >= SATELLITE_STATS_INTERVAL_MS) {
+        if (now - lastStatsMs >= SATELLITE_STATS_INTERVAL_MS) {
             printStats(now, maxSlewSpeedRad);
-            lastStatsPrintMs = now;
+            lastStatsMs = now;
         }
         #endif
-        
+
         #else
         (void)maxSlewSpeedRad; (void)orbitSteerAllowed;
         if (cachedPos.a < 0.0f) {
@@ -585,10 +577,10 @@ private:
 
 #if SATELLITE_ORBIT_ENABLE == 1
     // =====================================================================
-    // Coordinate trajectory recording (advanced tracking input)
+    // Trajectory storage and sampling
     // Recording starts in enable(), i.e. once the simple tracker runs.
     // =====================================================================
-    // 12 bytes per sample. timeMs and limited share one 32-bit word. 
+    // 12 bytes per sample. timeMs and limited share one 32-bit word.
     // The direction vector is computed when a sample is copied for a fit (copyRange/copySample).
     struct TrajectorySample {
         uint32_t timeMs  : 31;  // ms since sessionStartMillis (max ~24 days)
@@ -614,7 +606,7 @@ private:
     TrajectorySample* trajectorySamples = nullptr;   // TRAJECTORY_MAX_SAMPLES entries in the heap block
     size_t trajectorySampleCount = 0;
     size_t trajectoryRingIndex = 0;      // next write position once buffer is full
-    uint32_t lastTrajectorySampleTime = 0;
+    uint32_t lastSampleMs = 0;
     uint32_t sessionStartMillis = 0;
 
     // Anchor A window buffer (heap block, not on the task stack).
@@ -633,38 +625,258 @@ private:
 
     SatelliteOrbitModel orbitModel;      // last accepted fit (kept when a new fit fails)
     SatelliteOrbitModel candidateModel;  // scratch model for the current fit attempt
-    uint32_t lastFitTime = 0;
+    uint32_t lastFitMs = 0;
     float lastDevDeg = -1.0f;            // quality of the last fit attempt (deg), -1 = none
     uint32_t anchorAEarliestMs = 0;      // anchor A floor (session ms), moved forward on rejection
 
     #if SATELLITE_STATS_PRINT == 1
-        uint32_t lastStatsPrintMs = 0;       // Timestamp of last stats print
+        uint32_t lastStatsMs = 0;       // Timestamp of last stats print
         float lastClosestTca = 0.0f;         // absolute session time of last displayed TCA
         float lastClosestMaxElevDeg = 0.0f;  // max elevation at that TCA (deg)
         bool  hasClosestInfo = false;        // true once there is a valid closest pass
     #endif
 
-    // ---------------------------------------------------------------------
+    // Sample the current alt/az (caller checks SATELLITE_ORBIT_SAMPLE_INTERVAL_MS)
+    void sampleTrajectory(uint32_t now) {
+        lastSampleMs = now;
+
+        const Coordinate &pos = cachedPos;      // read in controlStep() this tick
+
+        size_t idx;
+        if (trajectorySampleCount < TRAJECTORY_MAX_SAMPLES) {
+            idx = trajectorySampleCount++;
+        } else {
+            idx = trajectoryRingIndex;
+            trajectoryRingIndex = (trajectoryRingIndex + 1) % TRAJECTORY_MAX_SAMPLES;
+        }
+        trajectorySamples[idx].timeMs   = now - sessionStartMillis;
+        trajectorySamples[idx].altitude = pos.a;
+        trajectorySamples[idx].azimuth  = pos.z;
+        trajectorySamples[idx].limited  = speedHold ? 1 : 0;
+    }
+
+    // Stored sample -> OrbitSample incl. direction vector (ENU unit vector)
+    static void toOrbitSample(const TrajectorySample& s, OrbitSample &dst) {
+        float ca = cosf(s.altitude);
+        dst.t   = s.timeMs * 0.001f;
+        dst.alt = s.altitude;
+        dst.az  = s.azimuth;
+        dst.dx  = ca * sinf(s.azimuth);
+        dst.dy  = ca * cosf(s.azimuth);
+        dst.dz  = sinf(s.altitude);
+    }
+
+    // i-th sample in chronological order (0 = oldest)
+    const TrajectorySample& trajectoryAt(size_t i) const {
+        size_t oldest = (trajectorySampleCount < TRAJECTORY_MAX_SAMPLES) ? 0 : trajectoryRingIndex;
+        return trajectorySamples[(oldest + i) % TRAJECTORY_MAX_SAMPLES];
+    }
+
+    // First chronological index with timeMs >= tMs (binary search, samples are time ordered).
+    // Returns trajectorySampleCount if no such sample exists.
+    size_t indexAtOrAfter(uint32_t tMs) const {
+        size_t lo = 0, hi = trajectorySampleCount;
+        while (lo < hi) {
+            size_t mid = (lo + hi) / 2;
+            if (trajectoryAt(mid).timeMs < tMs) lo = mid + 1; else hi = mid;
+        }
+        return lo;
+    }
+
+    // Copy samples with tStartMs <= t <= tEndMs into dst (chronological, max maxN).
+    // Returns number of samples copied.
+    size_t copyRange(uint32_t tStartMs, uint32_t tEndMs, OrbitSample* dst, size_t maxN) const {
+        size_t count = 0;
+        for (size_t i = indexAtOrAfter(tStartMs); i < trajectorySampleCount && count < maxN; i++) {
+            const TrajectorySample& s = trajectoryAt(i);
+            if (s.timeMs > tEndMs) break;
+            toOrbitSample(s, dst[count]);
+            count++;
+        }
+        return count;
+    }
+
+    // Copy one stored sample (chronological index i) into an OrbitSample
+    void copySample(size_t i, OrbitSample &dst) const {
+        toOrbitSample(trajectoryAt(i), dst);
+    }
+
+    // Chronological index of the last 'limited' sample with tStartMs <= t <= tEndMs,
+    // or trajectorySampleCount if there is none.
+    size_t lastLimitedIndex(uint32_t tStartMs, uint32_t tEndMs) const {
+        size_t found = trajectorySampleCount;
+        for (size_t i = indexAtOrAfter(tStartMs); i < trajectorySampleCount; i++) {
+            const TrajectorySample& s = trajectoryAt(i);
+            if (s.timeMs > tEndMs) break;
+            if (s.limited) found = i;
+        }
+        return found;
+    }
+
+    // Select anchor A window and copy it into anchorAWindow.
+    // Rules: window starts after SATELLITE_ORBIT_DISCARD_START_S, at the first sample with
+    // elevation >= SATELLITE_ORBIT_MIN_ANCHOR_ALT_DEG, but not earlier than
+    // SATELLITE_ORBIT_MAX_BASELINE_S before now (anchor A moves forward on long passes).
+    // Returns number of samples copied (0 = no usable anchor A yet).
+    size_t selectAnchorA(uint32_t newestMs) {
+        const uint32_t winMs  = SATELLITE_ORBIT_ANCHOR_A_WINDOW_S * 1000UL;
+        const uint32_t maxBl  = SATELLITE_ORBIT_MAX_BASELINE_S * 1000UL;
+        const uint32_t minBl  = SATELLITE_ORBIT_MIN_BASELINE_S * 1000UL;
+        const float    minAlt = SATELLITE_ORBIT_MIN_ANCHOR_ALT_DEG * DEG_TO_RAD_F;
+
+        uint32_t earliest = SATELLITE_ORBIT_DISCARD_START_S * 1000UL;
+        // Anchor time is the window centre: centre >= newest - maxBaseline
+        if (newestMs > maxBl + winMs / 2 && newestMs - maxBl - winMs / 2 > earliest) {
+            earliest = newestMs - maxBl - winMs / 2;
+        }
+        // After a rejected fit anchor A starts at the failed midpoint or later
+        if (anchorAEarliestMs > earliest) earliest = anchorAEarliestMs;
+
+        // Anchor A starts after the last 'limited' sample (recorded while the mount
+        // lagged, e.g. catch-up), so neither anchor A nor the quality midpoint
+        // between A and B lies inside a speed limit hold
+        size_t i = indexAtOrAfter(earliest);
+        size_t lim = lastLimitedIndex(earliest, newestMs);
+        if (lim < trajectorySampleCount) i = lim + 1;
+
+        // First sample from there that is high enough
+        while (i < trajectorySampleCount && trajectoryAt(i).altitude < minAlt) i++;
+        if (i >= trajectorySampleCount) return 0;
+
+        uint32_t startMs  = trajectoryAt(i).timeMs;
+        uint32_t centreMs = startMs + winMs / 2;
+        if (centreMs + minBl > newestMs) return 0;    // baseline too short yet
+
+        return copyRange(startMs, startMs + winMs, anchorAWindow, ANCHOR_A_MAX_SAMPLES);
+    }
+
+    // =====================================================================
+    // Orbit fitting
+    // =====================================================================
+    // True if updateOrbitFit() will attempt a fit at time 'now'
+    // (also used to take a fresh sample right before the fit = anchor B)
+    bool fitDue(uint32_t now) const {
+        return (now - sessionStartMillis) >=
+                   (SATELLITE_ORBIT_DISCARD_START_S + SATELLITE_ORBIT_MIN_BASELINE_S) * 1000UL &&
+               (now - lastFitMs) >= SATELLITE_ORBIT_FIT_INTERVAL_MS;
+    }
+
+    // Periodic two-point orbit fit (anchor A smoothed, anchor B = newest raw sample).
+    //   - hold (keep last orbit): speed limit active, newest sample 'limited',
+    //     or newest sample below MIN_ANCHOR_ALT_DEG
+    //   - quality: orbit vs. the stored sample halfway between A and B,
+    //     > MAX_DEV_DEG -> orbit dropped (simple integrator), anchor A moved forward
+    //   - failed fit (no root etc.): last orbit kept
+    //   - accepted: orbit passes through the current mount position -> manual offset
+    //     reset without jump, fallback cleared
+    void updateOrbitFit(uint32_t now) {
+        if (!fitDue(now)) return;
+        lastFitMs = now;
+        if (trajectorySampleCount == 0) return;
+        if (speedHold) return;                        // reported once by updateSpeedHold()
+
+        float tNow = (now - sessionStartMillis) * 0.001f;
+        (void)tNow;  // suppress unused warning when debug is off
+        size_t newestIdx = trajectorySampleCount - 1;
+        const TrajectorySample& newest = trajectoryAt(newestIdx);
+        if (newest.limited) return;
+        if (newest.altitude < SATELLITE_ORBIT_MIN_ANCHOR_ALT_DEG * DEG_TO_RAD_F) {
+            #if SATELLITE_ORBIT_DEBUG == 1
+            if (orbitModel.isValid()) printLowHoldDebug(tNow);
+            #endif
+            return;                                   // keep last orbit
+        }
+
+        size_t nA = selectAnchorA(newest.timeMs);
+        if (nA < 3) return;                           // no usable anchor A yet
+        copySample(newestIdx, anchorB);
+
+        // Quality check sample: halfway between anchor A centre and B
+        float tA  = 0.5f * (anchorAWindow[0].t + anchorAWindow[nA - 1].t);
+        uint32_t midMs = static_cast<uint32_t>(0.5f * (tA + anchorB.t) * 1000.0f);
+        size_t midIdx = indexAtOrAfter(midMs);
+        if (midIdx >= newestIdx) return;
+        copySample(midIdx, midSample);
+
+        bool ok = candidateModel.fit(anchorAWindow, nA, anchorB);
+        lastDevDeg = -1.0f;
+        if (ok) {
+            lastDevDeg = candidateModel.deviation(midSample) * RAD_TO_DEG_F;
+            if (lastDevDeg < 0.0f || lastDevDeg > SATELLITE_ORBIT_MAX_DEV_DEG) {
+                // Track is not this circular orbit (plane turning, bad anchor A, systematic
+                // error over a long baseline): drop the orbit -> simple integrator in this
+                // control step (predValid false -> switchMode), and move anchor A forward
+                // to the failed midpoint so the next fit uses a fresh, shorter baseline.
+                orbitModel.reset();
+                predValid = false;
+                anchorAEarliestMs = trajectoryAt(midIdx).timeMs;
+                #if SATELLITE_ORBIT_DEBUG == 1
+                char buf[120];
+                snprintf(buf, sizeof(buf),
+                    "ORBIT: rejected t=%.1fs dev=%.3fdeg base=%.1fs -> simple, anchor A from t=%.1fs",
+                    tNow, lastDevDeg, candidateModel.baselineS(), anchorAEarliestMs * 0.001f);
+                Serial.println(buf);
+                #endif
+                return;
+            }
+        }
+
+        if (ok) {
+            orbitModel = candidateModel;
+            // New orbit passes through the current mount position (anchor B, sampled this
+            // control step) -> manual corrections are contained, error is ~0 now.
+            // axErr was computed from the old orbit + offset: clear it for this
+            // step's PI instead of a second predict().
+            for (int i = 0; i < 2; i++) manualOffset[i] = axErr[i] = 0.0f;
+        }
+
+        #if SATELLITE_ORBIT_DEBUG == 1
+        printFitDebug(ok, nA, tNow);
+        #endif
+    }
+
+    // =====================================================================
     // Speed limit hold
     //   Trigger MOUNT (simple mode): commanded speed >= SPEED_LIMIT_FRACTION of max on any axis
     //   Trigger CATCHUP (orbit mode): any axis in catch-up (see updateCatchup())
     //   Hold: no orbit updates, samples flagged 'limited' (excluded from fits).
     //   Release: no trigger for SPEED_RELEASE_S.
-    // ---------------------------------------------------------------------
+    // =====================================================================
     enum class HoldReason : uint8_t { NONE, MOUNT, CATCHUP };
     bool mountAtLimit = false;
     bool speedHold = false;
     uint32_t lastLimitMs = 0;
     HoldReason holdReason = HoldReason::NONE;
 
-    // ---------------------------------------------------------------------
+    void updateSpeedHold(uint32_t now) {
+        if (mountAtLimit) {
+            lastLimitMs = now;
+            if (!speedHold) {
+                speedHold = true;
+                holdReason = steering ? HoldReason::CATCHUP : HoldReason::MOUNT;
+                #if SATELLITE_ORBIT_DEBUG == 1
+                printSpeedHoldDebug(true, now);
+                #endif
+            }
+            return;
+        }
+        if (!speedHold) return;
+        if (now - lastLimitMs < SATELLITE_ORBIT_SPEED_RELEASE_S * 1000UL) return;
+        speedHold = false;
+        #if SATELLITE_ORBIT_DEBUG == 1
+        printSpeedHoldDebug(false, now);
+        #endif
+        holdReason = HoldReason::NONE;
+    }
+
+    // =====================================================================
     // Orbit steering state, per axis (index 0 = axis1, 1 = axis2)
     //   feedforward = orbit axis rates (cached prediction of the control step)
     //   PI on the position error (orbit + manual offset - mount)
     //   manual stick corrections: added to the output every tick and integrated
     //   into manualOffset, so the PI does not pull them back; reset on new orbit
     //   catch-up: axis runs at max speed in the latched direction catchDir
-    // ---------------------------------------------------------------------
+    // =====================================================================
     static constexpr float PI_INTEGRAL_MAX = 0.002f;   // rad/s, limit of the I term (~0.11 deg/s)
     static constexpr float HALF_PI_F = 1.57079633f;
 
@@ -787,9 +999,9 @@ private:
 
     // Feedforward + PI. Uses only cached values (no getPosition / predict).
     void piStep(float maxSlewSpeedRad, uint32_t now) {
-        float dtc = (now - lastPiMs) * 0.001f;
+        float dtStep = (now - lastPiMs) * 0.001f;
         lastPiMs = now;
-        if (dtc > 0.5f) dtc = 0.5f;                    // after a pause: no big integral jump
+        if (dtStep > 0.5f) dtStep = 0.5f;                    // after a pause: no big integral jump
 
         for (int i = 0; i < 2; i++) {
             if (catchDir[i] != 0) {
@@ -799,7 +1011,7 @@ private:
             }
             // Anti-windup: freeze the integral while this axis output is clamped
             if (!axClamped[i]) {
-                axInteg[i] += SATELLITE_ORBIT_KI * axErr[i] * dtc;
+                axInteg[i] += SATELLITE_ORBIT_KI * axErr[i] * dtStep;
                 if (axInteg[i] >  PI_INTEGRAL_MAX) axInteg[i] =  PI_INTEGRAL_MAX;
                 if (axInteg[i] < -PI_INTEGRAL_MAX) axInteg[i] = -PI_INTEGRAL_MAX;
             }
@@ -824,230 +1036,17 @@ private:
         #endif
     }
 
-    void updateSpeedHold(uint32_t now) {
-        if (mountAtLimit) {
-            lastLimitMs = now;
-            if (!speedHold) {
-                speedHold = true;
-                holdReason = steering ? HoldReason::CATCHUP : HoldReason::MOUNT;
-                #if SATELLITE_ORBIT_DEBUG == 1
-                printSpeedHoldDebug(true, now);
-                #endif
-            }
-            return;
-        }
-        if (!speedHold) return;
-        if (now - lastLimitMs < SATELLITE_ORBIT_SPEED_RELEASE_S * 1000UL) return;
-        speedHold = false;
-        #if SATELLITE_ORBIT_DEBUG == 1
-        printSpeedHoldDebug(false, now);
-        #endif
-        holdReason = HoldReason::NONE;
-    }
+    // =====================================================================
+    // Debug helpers
+    // =====================================================================
+    #if SATELLITE_ORBIT_DEBUG == 1
 
-    // Accumulated manual correction on the sky (rad^2), axis1 scaled by cos(axis2). Debug only.
+    // Accumulated manual correction on the sky (rad^2), axis1 scaled by cos(axis2).
     float manualOffsetSq() const {
         float ex = manualOffset[0] * cosf(axPos[1]);
         return ex * ex + manualOffset[1] * manualOffset[1];
     }
 
-    // Sample the current alt/az (caller checks SATELLITE_ORBIT_SAMPLE_INTERVAL_MS)
-    void sampleTrajectory(uint32_t now) {
-        lastTrajectorySampleTime = now;
-
-        const Coordinate &pos = cachedPos;      // read in controlStep() this tick
-
-        size_t idx;
-        if (trajectorySampleCount < TRAJECTORY_MAX_SAMPLES) {
-            idx = trajectorySampleCount++;
-        } else {
-            idx = trajectoryRingIndex;
-            trajectoryRingIndex = (trajectoryRingIndex + 1) % TRAJECTORY_MAX_SAMPLES;
-        }
-        trajectorySamples[idx].timeMs   = now - sessionStartMillis;
-        trajectorySamples[idx].altitude = pos.a;
-        trajectorySamples[idx].azimuth  = pos.z;
-        trajectorySamples[idx].limited  = speedHold ? 1 : 0;
-    }
-
-    // Stored sample -> OrbitSample incl. direction vector (ENU unit vector)
-    static void toOrbitSample(const TrajectorySample& s, OrbitSample &dst) {
-        float ca = cosf(s.altitude);
-        dst.t   = s.timeMs * 0.001f;
-        dst.alt = s.altitude;
-        dst.az  = s.azimuth;
-        dst.dx  = ca * sinf(s.azimuth);
-        dst.dy  = ca * cosf(s.azimuth);
-        dst.dz  = sinf(s.altitude);
-    }
-
-    // i-th sample in chronological order (0 = oldest)
-    const TrajectorySample& trajectoryAt(size_t i) const {
-        size_t oldest = (trajectorySampleCount < TRAJECTORY_MAX_SAMPLES) ? 0 : trajectoryRingIndex;
-        return trajectorySamples[(oldest + i) % TRAJECTORY_MAX_SAMPLES];
-    }
-
-    // First chronological index with timeMs >= tMs (binary search, samples are time ordered).
-    // Returns trajectorySampleCount if no such sample exists.
-    size_t indexAtOrAfter(uint32_t tMs) const {
-        size_t lo = 0, hi = trajectorySampleCount;
-        while (lo < hi) {
-            size_t mid = (lo + hi) / 2;
-            if (trajectoryAt(mid).timeMs < tMs) lo = mid + 1; else hi = mid;
-        }
-        return lo;
-    }
-
-    // Copy samples with tStartMs <= t <= tEndMs into dst (chronological, max maxN).
-    // Returns number of samples copied.
-    size_t copyRange(uint32_t tStartMs, uint32_t tEndMs, OrbitSample* dst, size_t maxN) const {
-        size_t count = 0;
-        for (size_t i = indexAtOrAfter(tStartMs); i < trajectorySampleCount && count < maxN; i++) {
-            const TrajectorySample& s = trajectoryAt(i);
-            if (s.timeMs > tEndMs) break;
-            toOrbitSample(s, dst[count]);
-            count++;
-        }
-        return count;
-    }
-
-    // Copy one stored sample (chronological index i) into an OrbitSample
-    void copySample(size_t i, OrbitSample &dst) const {
-        toOrbitSample(trajectoryAt(i), dst);
-    }
-
-    // Chronological index of the last 'limited' sample with tStartMs <= t <= tEndMs,
-    // or trajectorySampleCount if there is none.
-    size_t lastLimitedIndex(uint32_t tStartMs, uint32_t tEndMs) const {
-        size_t found = trajectorySampleCount;
-        for (size_t i = indexAtOrAfter(tStartMs); i < trajectorySampleCount; i++) {
-            const TrajectorySample& s = trajectoryAt(i);
-            if (s.timeMs > tEndMs) break;
-            if (s.limited) found = i;
-        }
-        return found;
-    }
-
-    // Select anchor A window and copy it into anchorAWindow.
-    // Rules: window starts after SATELLITE_ORBIT_DISCARD_START_S, at the first sample with
-    // elevation >= SATELLITE_ORBIT_MIN_ANCHOR_ALT_DEG, but not earlier than
-    // SATELLITE_ORBIT_MAX_BASELINE_S before now (anchor A moves forward on long passes).
-    // Returns number of samples copied (0 = no usable anchor A yet).
-    size_t selectAnchorA(uint32_t newestMs) {
-        const uint32_t winMs  = SATELLITE_ORBIT_ANCHOR_A_WINDOW_S * 1000UL;
-        const uint32_t maxBl  = SATELLITE_ORBIT_MAX_BASELINE_S * 1000UL;
-        const uint32_t minBl  = SATELLITE_ORBIT_MIN_BASELINE_S * 1000UL;
-        const float    minAlt = SATELLITE_ORBIT_MIN_ANCHOR_ALT_DEG * DEG_TO_RAD_F;
-
-        uint32_t earliest = SATELLITE_ORBIT_DISCARD_START_S * 1000UL;
-        // Anchor time is the window centre: centre >= newest - maxBaseline
-        if (newestMs > maxBl + winMs / 2 && newestMs - maxBl - winMs / 2 > earliest) {
-            earliest = newestMs - maxBl - winMs / 2;
-        }
-        // After a rejected fit anchor A starts at the failed midpoint or later
-        if (anchorAEarliestMs > earliest) earliest = anchorAEarliestMs;
-
-        // Anchor A starts after the last 'limited' sample (recorded while the mount
-        // lagged, e.g. catch-up), so neither anchor A nor the quality midpoint
-        // between A and B lies inside a speed limit hold
-        size_t i = indexAtOrAfter(earliest);
-        size_t lim = lastLimitedIndex(earliest, newestMs);
-        if (lim < trajectorySampleCount) i = lim + 1;
-
-        // First sample from there that is high enough
-        while (i < trajectorySampleCount && trajectoryAt(i).altitude < minAlt) i++;
-        if (i >= trajectorySampleCount) return 0;
-
-        uint32_t startMs  = trajectoryAt(i).timeMs;
-        uint32_t centreMs = startMs + winMs / 2;
-        if (centreMs + minBl > newestMs) return 0;    // baseline too short yet
-
-        return copyRange(startMs, startMs + winMs, anchorAWindow, ANCHOR_A_MAX_SAMPLES);
-    }
-
-    // True if updateOrbitFit() will attempt a fit at time 'now'
-    // (also used to take a fresh sample right before the fit = anchor B)
-    bool fitDue(uint32_t now) const {
-        return (now - sessionStartMillis) >=
-                   (SATELLITE_ORBIT_DISCARD_START_S + SATELLITE_ORBIT_MIN_BASELINE_S) * 1000UL &&
-               (now - lastFitTime) >= SATELLITE_ORBIT_FIT_INTERVAL_MS;
-    }
-
-    // Periodic two-point orbit fit (anchor A smoothed, anchor B = newest raw sample).
-    //   - hold (keep last orbit): speed limit active, newest sample 'limited',
-    //     or newest sample below MIN_ANCHOR_ALT_DEG
-    //   - quality: orbit vs. the stored sample halfway between A and B,
-    //     > MAX_DEV_DEG -> orbit dropped (simple integrator), anchor A moved forward
-    //   - failed fit (no root etc.): last orbit kept
-    //   - accepted: orbit passes through the current mount position -> manual offset
-    //     reset without jump, fallback cleared
-    void updateOrbitFit(uint32_t now) {
-        if (!fitDue(now)) return;
-        lastFitTime = now;
-        if (trajectorySampleCount == 0) return;
-        if (speedHold) return;                        // reported once by updateSpeedHold()
-
-        float tNow = (now - sessionStartMillis) * 0.001f;
-        (void)tNow;  // suppress unused warning when debug is off
-        size_t newestIdx = trajectorySampleCount - 1;
-        const TrajectorySample& newest = trajectoryAt(newestIdx);
-        if (newest.limited) return;
-        if (newest.altitude < SATELLITE_ORBIT_MIN_ANCHOR_ALT_DEG * DEG_TO_RAD_F) {
-            #if SATELLITE_ORBIT_DEBUG == 1
-            if (orbitModel.isValid()) printLowHoldDebug(tNow);
-            #endif
-            return;                                   // keep last orbit
-        }
-
-        size_t nA = selectAnchorA(newest.timeMs);
-        if (nA < 3) return;                           // no usable anchor A yet
-        copySample(newestIdx, anchorB);
-
-        // Quality check sample: halfway between anchor A centre and B
-        float tA  = 0.5f * (anchorAWindow[0].t + anchorAWindow[nA - 1].t);
-        uint32_t midMs = (uint32_t)(0.5f * (tA + anchorB.t) * 1000.0f);
-        size_t midIdx = indexAtOrAfter(midMs);
-        if (midIdx >= newestIdx) return;
-        copySample(midIdx, midSample);
-
-        bool ok = candidateModel.fit(anchorAWindow, nA, anchorB);
-        lastDevDeg = -1.0f;
-        if (ok) {
-            lastDevDeg = candidateModel.deviation(midSample) * RAD_TO_DEG_F;
-            if (lastDevDeg < 0.0f || lastDevDeg > SATELLITE_ORBIT_MAX_DEV_DEG) {
-                // Track is not this circular orbit (plane turning, bad anchor A, systematic
-                // error over a long baseline): drop the orbit -> simple integrator in this
-                // control step (predValid false -> switchMode), and move anchor A forward
-                // to the failed midpoint so the next fit uses a fresh, shorter baseline.
-                orbitModel.reset();
-                predValid = false;
-                anchorAEarliestMs = trajectoryAt(midIdx).timeMs;
-                #if SATELLITE_ORBIT_DEBUG == 1
-                char buf[120];
-                snprintf(buf, sizeof(buf),
-                    "ORBIT: rejected t=%.1fs dev=%.3fdeg base=%.1fs -> simple, anchor A from t=%.1fs",
-                    tNow, lastDevDeg, candidateModel.baselineS(), anchorAEarliestMs * 0.001f);
-                Serial.println(buf);
-                #endif
-                return;
-            }
-        }
-
-        if (ok) {
-            orbitModel = candidateModel;
-            // New orbit passes through the current mount position (anchor B, sampled this
-            // control step) -> manual corrections are contained, error is ~0 now.
-            // axErr was computed from the old orbit + offset: clear it for this
-            // step's PI instead of a second predict().
-            for (int i = 0; i < 2; i++) manualOffset[i] = axErr[i] = 0.0f;
-        }
-
-        #if SATELLITE_ORBIT_DEBUG == 1
-        printFitDebug(ok, nA, tNow);
-        #endif
-    }
-
-    #if SATELLITE_ORBIT_DEBUG == 1
     // Offset (deg) between the current orbit and the raw newest mount sample (1x predict)
     float offsetToNewestDeg() const {
         if (!orbitModel.isValid() || trajectorySampleCount == 0) return -1.0f;
@@ -1056,22 +1055,22 @@ private:
         return orbitModel.deviation(s) * RAD_TO_DEG_F;
     }
 
-    void printFitDebug(bool ok, size_t nA, float tNow) {
+    void printFitDebug(bool ok, size_t nA, float tNow) const {
         char buf[200];
         const SatelliteOrbitModel &m = candidateModel;
         if (m.isValid()) {
             snprintf(buf, sizeof(buf),
                 "ORBIT: fit %s t=%.1fs nA=%u base=%.1fs sky=%.2fdeg alt=%.0fkm range=%.0fkm period=%.1fmin dev=%.3fdeg",
-                ok ? "OK" : "FAILED", tNow, (unsigned)nA, m.baselineS(), m.skyAngle() * RAD_TO_DEG_F,
+                ok ? "OK" : "FAILED", tNow, static_cast<unsigned>(nA), m.baselineS(), m.skyAngle() * RAD_TO_DEG_F,
                 m.altitudeM() * 0.001f, m.rangeM() * 0.001f, m.periodS() / 60.0f, lastDevDeg);
         } else {
             snprintf(buf, sizeof(buf), "ORBIT: fit FAILED t=%.1fs nA=%u base=%.1fs (keeping last orbit)",
-                tNow, (unsigned)nA, m.baselineS());
+                tNow, static_cast<unsigned>(nA), m.baselineS());
         }
         Serial.println(buf);
     }
 
-    void printLowHoldDebug(float tNow) {
+    void printLowHoldDebug(float tNow) const {
         char buf[100];
         snprintf(buf, sizeof(buf), "ORBIT: hold t=%.1fs reason=low offNow=%.3fdeg",
             tNow, offsetToNewestDeg());
@@ -1079,7 +1078,7 @@ private:
     }
 
     // Printed once when the speed limit hold starts and once when it ends
-    void printSpeedHoldDebug(bool start, uint32_t now) {
+    void printSpeedHoldDebug(bool start, uint32_t now) const {
         char buf[100];
         float tNow = (now - sessionStartMillis) * 0.001f;
         if (start) {
@@ -1093,7 +1092,7 @@ private:
     }
 
     // Printed once when an axis enters and once when it leaves catch-up
-    void printCatchupDebug(int i, bool start, float tNow) {
+    void printCatchupDebug(int i, bool start, float tNow) const {
         char buf[100];
         if (start) {
             snprintf(buf, sizeof(buf), "ORBIT: catchup ax%d dir=%c t=%.1fs ff=%.3fdeg/s err=%.3fdeg",
@@ -1107,7 +1106,10 @@ private:
     }
     #endif // SATELLITE_ORBIT_DEBUG
 
-#if SATELLITE_STATS_PRINT == 1
+    // =====================================================================
+    // Stats printing
+    // =====================================================================
+    #if SATELLITE_STATS_PRINT == 1
     void printStats(uint32_t now, float maxSlewSpeedRad) {
         float tNow = (now - sessionStartMillis) * 0.001f;
 
@@ -1165,7 +1167,7 @@ private:
             );
         }
     }
-#endif // SATELLITE_STATS_PRINT == 1
+    #endif // SATELLITE_STATS_PRINT == 1
 
 #endif // SATELLITE_ORBIT_ENABLE
 

@@ -72,123 +72,119 @@ GamepadPILOT gamepadpilot;
 
 void GamepadPILOT::run() {
 
-  // --- debug: plugin tick duration ---------------------------------------
-  #if TIMING_DEBUG == 1
+#if TIMING_DEBUG == 1
     uint32_t tickStartUs = micros();
-  #endif
-
-  // --- debug: periodic Freertos system stats ----------------------------
-  #if VERBOSE_SYSTEM_STATS == 1
-    handleVerboseSystemStats();
-  #endif
-
-  // --- update Bluepad32 -------------------------------------------------
-  BP32.update();
-  ControllerPtr myCtl = myControllers[0];
-
-  // --- watchdog: refresh on new data, detect stale/connection loss --------
-  if (myCtl && myCtl->isConnected() && myCtl->hasData()) {
-    lastDataMillis = millis();
-    watchdogActive = false;
-}
-
-  bool isMoving = (smoothTargetSpeedX != 0.0f || smoothTargetSpeedY != 0.0f);
-  bool connectionLost = !(myCtl && myCtl->isConnected());
-  bool dataStale = (lastDataMillis > 0 && (millis() - lastDataMillis > WATCHDOGTIMEOUT));
-
-  // Activate sticky watchdog if moving and data is stale, unless satellite tracking is active
-#if ENABLE_SAT_TRACKING_FEATURE == 1
-  if (isMoving && dataStale && !satelliteTracker.isActive()) {
-    watchdogActive = true;
-  }
-#else
-  if (isMoving && dataStale) {
-    watchdogActive = true;
-  }
 #endif
 
-bool shouldStop = connectionLost || watchdogActive;
+#if VERBOSE_SYSTEM_STATS == 1
+handleVerboseSystemStats();
+#endif
 
-// Main loop running the slewing =========================================================
-  if (!shouldStop) {
-    safetyStopNoticeSent = false;
+    // --- update Bluepad32 -------------------------------------------------
+    BP32.update();
+    ControllerPtr myCtl = myControllers[0];
+
+    // --- watchdog: refresh on new data, detect stale/connection loss --------
+    if (myCtl && myCtl->isConnected() && myCtl->hasData()) {
+        lastDataMillis = millis();
+        watchdogActive = false;
+    }
+
+    bool isMoving = (smoothTargetSpeedX != 0.0f || smoothTargetSpeedY != 0.0f);
+    bool connectionLost = !(myCtl && myCtl->isConnected());
+    bool dataStale = (lastDataMillis > 0 && (millis() - lastDataMillis > WATCHDOGTIMEOUT));
+
+    // Activate sticky watchdog if moving and data is stale, unless satellite tracking is active
+#if ENABLE_SAT_TRACKING_FEATURE == 1
+    if (isMoving && dataStale && !satelliteTracker.isActive()) {
+        watchdogActive = true;
+    }
+#else
+    if (isMoving && dataStale) {
+        watchdogActive = true;
+    }
+#endif
+
+    bool shouldStop = connectionLost || watchdogActive;
+
+    // Main loop running the slewing =========================================================
+    if (!shouldStop) {
+        safetyStopNoticeSent = false;
 
     // --- debug: raw controller output -------------------------------------
-    #if RAW_DEBUG_MODE != 0
-      handleRawDebugMode(myCtl);
-    #endif
+#if RAW_DEBUG_MODE != 0
+        handleRawDebugMode(myCtl);
+#endif
 
     // --- normal operation -------------------------------------------------
-    #if RAW_DEBUG_MODE == 0
-      readStickValues(myCtl);
+#if RAW_DEBUG_MODE == 0
+        readStickValues(myCtl);
 
-      bool buttonsChanged = (btns != lastBtns || dpad != lastDpad);
+        bool buttonsChanged = (btns != lastBtns || dpad != lastDpad);
 
-      // --- unlock sequence (if enabled) ----------------------------------
-      #if USE_UNLOCK_SEQUENCE == 1
+    // --- unlock sequence ------------- ----------------------------------
+#if USE_UNLOCK_SEQUENCE == 1
         if (!handleUnlockSequence(dpad)) {
-          stickPercentX = 0;
-          stickPercentY = 0;
-          stickPercentrX = 0;
-          stickPercentrY = 0;
-          calculateSmoothSpeeds(dt); //allow decelleration and stop to finish on quick reconnects
-          sendSlewCommands();
-          #if TIMING_DEBUG == 1
+            stickPercentX = 0;
+            stickPercentY = 0;
+            stickPercentrX = 0;
+            stickPercentrY = 0;
+            calculateSmoothSpeeds(dt); //allow decelleration 
+            sendSlewCommands();        // and stop to finish on quick reconnects
+#if TIMING_DEBUG == 1
             uint32_t tickEndUs = micros();
             handleTimingDebug(tickStartUs, tickEndUs);
-          #endif
-          return; // Skip the rest of the processing for this tick
+#endif
+            return;
         }
-      #endif
+#endif
 
-      // --- normalize sticks to -1..1 -------------------------------------
-      processStickNormalization();
+        // --- normalize sticks to -1..1 -------------------------------------
+        processStickNormalization();
 
-      bool userSlewInputActive = (MAIN_STICK_X != 0.0f || MAIN_STICK_Y != 0.0f);
-      #if USE_DPAD_SLEWING == 1
+        bool userSlewInputActive = !mainStickCentered();
+#if USE_DPAD_SLEWING == 1
         userSlewInputActive = userSlewInputActive || (dpad != 0);
-      #endif
+#endif
       
-      // request max slew speed only on rising edge of stick activity
-      if (userSlewInputActive && !wasUserSlewInputActive) {
-        requestMaxSlewSpeed();
-      }
-      wasUserSlewInputActive = userSlewInputActive;
+        // request max slew speed only on rising edge of stick activity
+        if (userSlewInputActive && !wasUserSlewInputActive) {
+            requestMaxSlewSpeed();
+        }
+        wasUserSlewInputActive = userSlewInputActive;
 
-      // check async max slew speed response
-      if (brokerHandle != 0) {
-        updateMaxSlewSpeedFromBroker();
-      }
+        // check async max slew speed response
+        if (brokerHandle != 0) {
+            updateMaxSlewSpeedFromBroker();
+        }
 
-      // --- handle button events -------------------------------------------
-      if (buttonsChanged) {
-        handleButtonEvents(btns, dpad);
-      }
+        // --- handle button events -------------------------------------------
+        if (buttonsChanged) {
+            handleButtonEvents(btns, dpad);
+        }
 
-      // --- map sticks to target slew speeds with checking limits -------------------------------
-      updateTargetSpeeds(dt);
-    #endif // RAW_DEBUG_MODE == 0
-  } else {
-    // safety stop when connection lost or watchdog active
-    handleSafetyStop(connectionLost);
+        // --- map sticks to target slew speeds with checking limits -----------
+        updateTargetSpeeds(dt);
+#endif // RAW_DEBUG_MODE == 0
+    } else {
+        handleSafetyStop(connectionLost);
   }
 
-  // --- post-processing (always unless raw debug) --------------------------
-  #if RAW_DEBUG_MODE == 0
+    // --- smooth and send commands ---------------------------------------------
+#if RAW_DEBUG_MODE == 0
     // smooth target speeds using acceleration
     calculateSmoothSpeeds(dt);
 
     // send slew commands, handle acceleration and cleanup
     sendSlewCommands();
 
-    #if AXIS_STATE_DEBUG == 1
-      handleAxisStateDebug();
-    #endif //AXIS_STATE_DEBUG == 1
-  #endif // RAW_DEBUG_MODE == 0
+#if AXIS_STATE_DEBUG == 1
+    handleAxisStateDebug();
+#endif //AXIS_STATE_DEBUG == 1
+#endif // RAW_DEBUG_MODE == 0
 
-  #if TIMING_DEBUG == 1
+#if TIMING_DEBUG == 1
     uint32_t tickEndUs = micros();
     handleTimingDebug(tickStartUs, tickEndUs);
-  #endif
+#endif
 }
-
